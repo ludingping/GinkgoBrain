@@ -1,4 +1,4 @@
-"""Data loading utilities for stocks (yfinance) and crypto (ccxt)."""
+"""Data loading utilities for stocks (yfinance), crypto (ccxt), and market sentiment."""
 import pandas as pd
 import yfinance as yf
 
@@ -52,3 +52,46 @@ def load_crypto_data(
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     df = df.set_index("timestamp").reset_index(drop=True)
     return df.dropna()
+
+
+_FNG_ORIGIN = pd.Timestamp("2018-02-01")
+_FNG_URL    = "https://api.alternative.me/fng/"
+
+
+def load_fng(limit: int | str = 365) -> pd.DataFrame:
+    """
+    Fetch the Crypto Fear & Greed Index from alternative.me.
+
+    Args:
+        limit: Number of daily records to retrieve.
+               Pass ``"ALL"`` to fetch every available day from
+               2018-02-01 through today.
+               Defaults to 365 (≈ 1 year).
+
+    Returns:
+        DataFrame with columns:
+            date        – date (UTC, tz-naive)
+            value       – index score 0–100
+            label       – text classification (e.g. "Fear", "Greed")
+        Sorted ascending by date.
+    """
+    import requests
+
+    if isinstance(limit, str) and limit.upper() == "ALL":
+        n = (pd.Timestamp.now().normalize() - _FNG_ORIGIN).days + 1
+    else:
+        n = int(limit)
+
+    resp = requests.get(_FNG_URL, params={"limit": n, "format": "json"}, timeout=15)
+    resp.raise_for_status()
+    payload = resp.json()
+
+    records = payload.get("data", [])
+    df = pd.DataFrame(records)
+    df["date"]  = pd.to_datetime(df["timestamp"].astype(int), unit="s").dt.normalize()
+    df["value"] = df["value"].astype(int)
+    df = (df.rename(columns={"value_classification": "label"})
+            [["date", "value", "label"]]
+            .sort_values("date")
+            .reset_index(drop=True))
+    return df

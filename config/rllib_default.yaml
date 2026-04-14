@@ -1,0 +1,35 @@
+training:
+  backend: rllib
+  algo: ppo
+  n_iterations: 200        # RLlib training iterations (one rollout+SGD pass each)
+  log_interval: 20
+  num_workers: 0           # set >0 for parallel rollout workers
+  algo_kwargs:
+    lr: 3.0e-4
+    gamma: 0.99
+    lambda_: 0.95          # GAE lambda (note: underscore avoids Python keyword)
+    clip_param: 0.2
+    entropy_coeff: 0.01
+    train_batch_size: 4000
+    sgd_minibatch_size: 128
+    num_sgd_iter: 10
+
+env:
+  window_size: 20
+  initial_balance: 10000.0
+  commission: 0.001
+
+stock:
+  ticker: "AAPL"
+  start: "2020-01-01"
+  end: "2024-01-01"
+  interval: "1d"
+  train_ratio: 0.8
+
+crypto:
+  symbol: "BTC/USDT"
+  exchange: "binance"
+  timeframe: "1d"
+  since: "2020-01-01"
+  limit: 2000
+  train_ratio: 0.8
