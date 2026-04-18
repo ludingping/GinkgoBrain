@@ -44,6 +44,14 @@ def main():
              "utils.signals.add_signals; `end_to_end` keeps the legacy path.",
     )
     parser.add_argument("--run-name", default=None)
+    parser.add_argument(
+        "--combiner",
+        choices=["ppo", "gbdt"],
+        default="ppo",
+        help="Combiner type for signal_layered paradigm: "
+             "'ppo' (default) trains PPO on SignalLayeredEnv; "
+             "'gbdt' trains LightGBM Sharpe-regression combiner.",
+    )
     args = parser.parse_args()
 
     with open("config/default.yaml") as f:
@@ -60,6 +68,8 @@ def main():
     paradigm = args.paradigm or cfg.get("paradigm", "end_to_end")
 
     if paradigm == "signal_layered":
+        if args.combiner == "gbdt":
+            return _train_gbdt(cfg, args)
         return _train_signal_layered(cfg, train_cfg, env_cfg, backend, args)
 
     if args.mode == "stock":
@@ -256,6 +266,51 @@ def _train_signal_layered(cfg, train_cfg, env_cfg, backend, args) -> None:
     )
     trainer.train(total_timesteps=train_cfg["total_timesteps"])
     trainer.save()
+
+
+def _train_gbdt(cfg: dict, args) -> None:
+    """Phase 4 path: LightGBM Sharpe-regression combiner (§6 of design doc)."""
+    from agents.gbdt_combiner import GBDTCombiner
+    from utils.indicators import add_indicators
+
+    if args.mode != "crypto":
+        raise NotImplementedError("gbdt combiner currently only supports --mode crypto")
+
+    signals_cfg = cfg.get("signals") or {}
+    signals_path = signals_cfg.get("config_path", "config/signals_v1.yaml")
+    signal_cols = load_signal_list(signals_path)
+    print(f"Loaded {len(signal_cols)} signals from {signals_path}")
+
+    c = cfg["crypto"]
+    df_tf = _load_crypto_df(c)
+    df = add_indicators(df_tf)
+    df = add_signals(df)
+
+    missing = [s for s in signal_cols if s not in df.columns]
+    if missing:
+        raise ValueError(f"add_signals did not produce required columns: {missing}")
+
+    train_ratio = c.get("train_ratio", 0.75)
+    train_df, _ = split_df(df, train_ratio)
+    print(f"Train period: {train_df['timestamp'].iloc[0]} → {train_df['timestamp'].iloc[-1]} "
+          f"({len(train_df)} bars)")
+
+    gbdt_cfg = cfg.get("gbdt", {})
+    combiner = GBDTCombiner(gbdt_cfg)
+    print(f"Training GBDT combiner (horizon={combiner.horizon}, "
+          f"train_ratio={combiner.train_ratio})...")
+    combiner.fit(train_df, signal_cols)
+
+    best = combiner.best_iteration
+    r2 = combiner.val_r2
+    print(f"  Early stopping at tree {best}  |  val R² = {r2:.4f}")
+
+    run_name = args.run_name or (
+        f"{c['symbol'].replace('/', '')}_gbdt_{c.get('timeframe', '1d')}"
+    )
+    save_path = f"models/saved/{run_name}"
+    combiner.save(save_path)
+    print(f"Saved combiner to {save_path}.lgb + {save_path}.meta.json")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,30 @@
+# Stage 4 — 1d GBDT Sharpe-regression combiner (§6 of 信号分层架构与可解释RL设计.md).
+# Usage: python train.py --config config/stage4_1d_gbdt.yaml --combiner gbdt
+paradigm: signal_layered
+
+signals:
+  config_path: config/signals_v1.yaml
+
+gbdt:
+  horizon: 5              # 预测未来 5 根 1d 的风险调整收益
+  vol_floor: 1.0e-4       # 横盘保护：波动率地板
+  clip_range: [-5.0, 5.0] # 极端标签截断
+  thresholds: [1.0, 0.5, 0.0, -0.5]  # Sharpe → 仓位档映射
+  train_ratio: 0.8        # 训练/验证切分（时序，不随机）
+  early_stopping_rounds: 30
+  lgb_params:
+    n_estimators: 500
+    max_depth: 6
+    learning_rate: 0.05
+    min_child_samples: 20
+    reg_alpha: 0.1
+    reg_lambda: 0.1
+
+crypto:
+  symbol: "BTC/USDT"
+  timeframe: "1d"
+  start_date: "2020-01-01 00:00:00"
+  end_date: "2024-06-30 00:00:00"   # TC-D3 训练期
+  timezone: "Asia/Shanghai"
+  db_table: "public.crypto_kline_binance"
+  train_ratio: 0.80        # 训练用前 80%，最后 20% 留做测试
