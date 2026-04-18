@@ -1,0 +1,38 @@
+version: 1
+generated_at: '2026-04-18T13:43:54'
+source:
+  cache_file: data/cache/BTCUSDT_4h_2020-01-01_2024-07-01.parquet
+  warmup_window: 100
+  periods_per_year: 2190
+thresholds:
+  sharpe_min: -0.2
+  pearson_abs_max: 0.95
+signals:
+- sig_trend_macd_hist
+- sig_trend_slope_21
+- sig_mom_rsi_trend
+- sig_mom_roc_zscore
+- sig_vol_atr_pct
+- sig_vol_bb_width
+- sig_vol_bb_position
+- sig_volume_obv_slope
+- sig_volume_ratio
+- sig_regime_drawdown
+- sig_regime_return_60
+eliminated:
+- signal: sig_mom_stoch_state
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.594 < -0.2
+  sharpe: -0.5944
+- signal: sig_trend_price_above_ma
+  reason: correlation_redundancy
+  detail: '|ρ|=0.982 (+0.982) with sig_mom_rsi_trend (kept: Sharpe=+0.693 vs +0.528)'
+  sharpe: 0.5279
+- signal: sig_trend_ema_cross
+  reason: correlation_redundancy
+  detail: '|ρ|=0.978 (+0.978) with sig_trend_slope_21 (kept: Sharpe=+0.745 vs +0.682)'
+  sharpe: 0.6824
+- signal: sig_mom_rsi_zone
+  reason: correlation_redundancy
+  detail: '|ρ|=0.952 (-0.952) with sig_mom_rsi_trend (kept: Sharpe=+0.693 vs +0.093)'
+  sharpe: 0.0929

@@ -1,0 +1,43 @@
+# Stage 2 — 4h signal-layered PPO (new paradigm).
+# Co-exists with stage2_4h.yaml; select via `train.py --paradigm signal_layered`.
+paradigm: signal_layered
+
+training:
+  algo: ppo
+  policy: MlpPolicy       # signal 层已是高浓缩特征，不自动套 TradingCNN
+  total_timesteps: 1_000_000
+  n_envs: 8
+  backend: sb3
+  algo_kwargs:
+    learning_rate: 1.5e-4   # 略低 → 减慢收敛速度，避免过早坍缩
+    gamma: 0.995
+    n_steps: 1024            # 更长 rollout → 更完整的 credit assignment
+    batch_size: 512
+    n_epochs: 10
+    gae_lambda: 0.95
+    clip_range: 0.2
+    ent_coef: 0.05           # 更高熵正则 → 推迟 policy 坍缩，延长有效探索期
+  # Phase 2 后置优化，默认关闭（§5.1.3）
+  action_masking: false
+
+env:
+  window_size: 24         # 4h × 24 = 4 天
+  initial_balance: 10000.0
+  commission: 0.0005      # 符合 Binance taker 手续费
+  risk_aversion_coef: 0.5 # 下行轻度放大（§5.4.4）
+  excess_return_coef: 0.5 # 相对收益激励，替代 missed_opportunity_coef
+  stop_atr_mult: 2.0      # ATR 止损倍数
+  stop_cooldown_steps: 3  # 止损后冷却期
+  random_start: true
+
+signals:
+  config_path: config/signals_v1.yaml
+
+crypto:
+  symbol: "BTC/USDT"
+  timeframe: "4h"
+  start_date: "2020-01-01 00:00:00"
+  end_date: "2026-04-13 00:00:00"
+  timezone: "Asia/Shanghai"
+  db_table: "public.crypto_kline_binance"
+  train_ratio: 0.75       # ~2020-01 到 2024-09，留 ~18 个月做 eval + test

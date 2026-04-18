@@ -5,8 +5,9 @@ import pandas as pd
 
 from utils import load_stock_data, load_crypto_data, add_indicators, add_multi_timeframe_indicators
 from utils.db import read_ohlcv
+from utils.signals import add_signals
 from agents.ppo_shared import resample_ohlcv
-from envs import StockTradingEnv, CryptoTradingEnv
+from envs import StockTradingEnv, CryptoTradingEnv, SignalLayeredEnv, load_signal_list
 from agents import Trainer, RLlibTrainer
 from agents.trainer import TradingCNN
 
@@ -34,12 +35,20 @@ def main():
         default=None,
         help="RL backend (overrides config backend field)",
     )
+    parser.add_argument(
+        "--paradigm",
+        choices=["end_to_end", "signal_layered"],
+        default=None,
+        help="Training paradigm (overrides config `paradigm` field). "
+             "`signal_layered` routes through envs.SignalLayeredEnv + "
+             "utils.signals.add_signals; `end_to_end` keeps the legacy path.",
+    )
     parser.add_argument("--run-name", default=None)
     args = parser.parse_args()
 
     with open("config/default.yaml") as f:
         cfg = yaml.safe_load(f)
-    
+
     if args.config != "config/default.yaml":
         with open(args.config) as f:
             stage_cfg = yaml.safe_load(f)
@@ -48,6 +57,10 @@ def main():
     env_cfg = cfg["env"]
     train_cfg = cfg["training"]
     backend = args.backend or train_cfg.get("backend", "sb3")
+    paradigm = args.paradigm or cfg.get("paradigm", "end_to_end")
+
+    if paradigm == "signal_layered":
+        return _train_signal_layered(cfg, train_cfg, env_cfg, backend, args)
 
     if args.mode == "stock":
         s = cfg["stock"]
@@ -141,6 +154,107 @@ def main():
         print(f"[SB3] Training {run_name} for {train_cfg['total_timesteps']:,} timesteps...")
         trainer.train(total_timesteps=train_cfg["total_timesteps"])
 
+    trainer.save()
+
+
+def _load_crypto_df(c: dict) -> pd.DataFrame:
+    """Shared crypto DB → DataFrame loader used by both paradigms."""
+    start_date = c.get("start_date", "2018-01-01 00:00:00")
+    end_date = c.get("end_date", "2026-04-13 00:00:00")
+    tz = c.get("timezone", "Asia/Shanghai")
+
+    start_utc = pd.Timestamp(start_date, tz=tz).tz_convert("UTC").isoformat()
+    end_utc = pd.Timestamp(end_date, tz=tz).tz_convert("UTC").isoformat()
+
+    print(f"Loading crypto data from DB ({start_date} to {end_date})...")
+    df_raw = read_ohlcv(
+        c["symbol"],
+        start=start_utc,
+        end=end_utc,
+        table=c.get("db_table", "public.crypto_kline_binance"),
+        only_closed=True,
+    )
+    ts = df_raw["timestamp"]
+    if ts.dt.tz is None:
+        ts = ts.dt.tz_localize("UTC")
+    df_raw["timestamp"] = ts.dt.tz_convert(tz)
+
+    tf_resample = c.get("timeframe", "1d").upper()
+    if tf_resample == "1M":
+        return df_raw
+    return resample_ohlcv(df_raw, tf_resample)
+
+
+def _train_signal_layered(cfg, train_cfg, env_cfg, backend, args) -> None:
+    """Phase 2 path: SignalLayeredEnv + sig_* features from utils.signals."""
+    if args.mode != "crypto":
+        raise NotImplementedError(
+            "signal_layered paradigm currently only supports --mode crypto"
+        )
+    if backend != "sb3":
+        raise NotImplementedError(
+            "signal_layered paradigm currently only supports --backend sb3"
+        )
+
+    signals_cfg = cfg.get("signals") or {}
+    signals_path = signals_cfg.get("config_path", "config/signals_v1.yaml")
+    signal_cols = load_signal_list(signals_path)
+    print(f"Loaded {len(signal_cols)} signals from {signals_path}")
+
+    c = cfg["crypto"]
+    df_tf = _load_crypto_df(c)
+    df = add_indicators(df_tf)
+    df = add_signals(df)
+
+    missing = [s for s in signal_cols if s not in df.columns]
+    if missing:
+        raise ValueError(f"add_signals did not produce required columns: {missing}")
+
+    train_df, eval_df = split_df(df, c.get("train_ratio", 0.75))
+
+    # Drop legacy keys that default.yaml injects for the end-to-end env but
+    # SignalLayeredEnv does not accept.
+    _ALLOWED_ENV_KEYS = {
+        "window_size", "initial_balance", "commission",
+        "risk_aversion_coef", "excess_return_coef",
+        "stop_atr_mult", "stop_cooldown_steps",
+        "random_start", "render_mode",
+    }
+    clean_env_cfg = {k: v for k, v in env_cfg.items() if k in _ALLOWED_ENV_KEYS}
+    dropped = set(env_cfg) - _ALLOWED_ENV_KEYS
+    if dropped:
+        print(f"[signal_layered] ignoring legacy env keys: {sorted(dropped)}")
+
+    def make_train_env():
+        return SignalLayeredEnv(train_df, signal_cols=signal_cols, **clean_env_cfg)
+
+    def make_eval_env():
+        eval_kwargs = dict(clean_env_cfg)
+        eval_kwargs["random_start"] = False
+        return SignalLayeredEnv(eval_df, signal_cols=signal_cols, **eval_kwargs)
+
+    algo_kwargs = dict(train_cfg.get("algo_kwargs", {}))
+    # signal-layered 观察空间是浓缩特征，走默认 MLP；不注入 TradingCNN。
+
+    run_name = args.run_name or (
+        f"{c['symbol'].replace('/', '')}_signal_layered_{c.get('timeframe', '4h')}"
+    )
+
+    trainer = Trainer(
+        env_fn=make_train_env,
+        eval_env_fn=make_eval_env,
+        algo=train_cfg["algo"],
+        run_name=run_name,
+        policy=train_cfg.get("policy", "MlpPolicy"),
+        algo_kwargs=algo_kwargs,
+        n_envs=train_cfg.get("n_envs", 1),
+        normalize_obs=False,   # sig_* 已 ∈ [-1, 1]，state 已 clip
+    )
+    print(
+        f"[SB3][signal_layered] Training {run_name} for "
+        f"{train_cfg['total_timesteps']:,} timesteps..."
+    )
+    trainer.train(total_timesteps=train_cfg["total_timesteps"])
     trainer.save()
 
 
