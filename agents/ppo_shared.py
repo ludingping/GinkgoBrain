@@ -130,6 +130,7 @@ class CryptoPPOEnv(gym.Env):
         trade_penalty_coef: float = 1.0,
         action_inertia_coef: float = 0.001,
         risk_aversion_coef: float  = 2.0,
+        excess_return_coef: float  = 0.0,
         random_start: bool        = False,
     ):
         super().__init__()
@@ -141,6 +142,7 @@ class CryptoPPOEnv(gym.Env):
         self.trade_penalty_coef  = trade_penalty_coef
         self.action_inertia_coef = action_inertia_coef
         self.risk_aversion_coef  = risk_aversion_coef
+        self.excess_return_coef  = excess_return_coef
         self.random_start        = random_start
         self.n_feat              = features.shape[1]
 
@@ -243,6 +245,13 @@ class CryptoPPOEnv(gym.Env):
 
         log_ret = float(np.log(max(new_port, 1e-8) / max(prev_port, 1e-8)))
         reward  = log_ret * (1.0 + self.risk_aversion_coef) if log_ret < 0 else log_ret
+
+        # P11: excess return over market (alpha reward)
+        if self.excess_return_coef > 0:
+            market_ret = float(np.log(new_price / max(price, 1e-8)))
+            excess_ret = log_ret - market_ret
+            reward += self.excess_return_coef * excess_ret
+
         reward -= self._last_trade_cost * self.trade_penalty_coef
 
         curr_is_holding = int(self.position > 0)

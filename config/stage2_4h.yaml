@@ -1,0 +1,25 @@
+training:
+  total_timesteps: 2_000_000
+  n_envs: 6
+  algo_kwargs:
+    learning_rate: 2.0e-4
+    gamma: 0.995        # [新增] 提升远见，让模型目光放长远，不要做超短线投机
+    n_steps: 512
+    batch_size: 256
+    ent_coef: 0.02      # [上调] 鼓励模型多去探索未知行情，避免陷入死板的空仓期
+    clip_range: 0.2
+env:
+  window_size: 48
+  commission: 0.001
+  trade_penalty_coef: 1.0
+  action_inertia_coef: 0.0005
+  risk_aversion_coef: 0.1
+  excess_return_coef: 1.0     # 奖励跑赢市场：空仓躲跌=正奖励，空仓踏空=负奖励
+  random_start: true
+
+crypto:
+  symbol: "BTC/USDT"
+  timeframe: "4h"
+  start_date: "2020-01-01 00:00:00"
+  end_date: "2026-04-13 00:00:00"
+  timezone: "Asia/Shanghai"

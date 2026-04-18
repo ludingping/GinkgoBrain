@@ -18,7 +18,8 @@ def load_stock_data(
     df.columns = [c.lower() for c in df.columns]
     df = df[["open", "high", "low", "close", "volume"]].dropna()
     df.index = pd.to_datetime(df.index)
-    return df.reset_index(drop=True)
+    df.index.name = "timestamp"
+    return df.reset_index()
 
 
 def load_crypto_data(
@@ -50,8 +51,7 @@ def load_crypto_data(
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since_ms, limit=limit)
     df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    df = df.set_index("timestamp").reset_index(drop=True)
-    return df.dropna()
+    return df.dropna().reset_index(drop=True)
 
 
 _FNG_ORIGIN = pd.Timestamp("2018-02-01")

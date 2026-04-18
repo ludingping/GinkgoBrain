@@ -1,0 +1,24 @@
+training:
+  total_timesteps: 8_000_000
+  n_envs: 8
+  algo_kwargs:
+    learning_rate: 1.0e-4
+    n_steps: 1024
+    batch_size: 512
+    ent_coef: 0.001
+    clip_range: 0.15
+
+env:
+  window_size: 120
+  commission: 0.0005
+  trade_penalty_coef: 1.0
+  action_inertia_coef: 0.001
+  risk_aversion_coef: 2.0
+  random_start: true
+
+crypto:
+  symbol: "BTC/USDT"
+  timeframe: "1m"
+  start_date: "2020-01-01 00:00:00"
+  end_date: "2026-04-13 00:00:00"
+  timezone: "Asia/Shanghai"

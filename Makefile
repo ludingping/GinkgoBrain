@@ -1,4 +1,4 @@
-.PHONY: help install sync test train-stock train-crypto eval-stock eval-crypto tb clean
+.PHONY: help install sync test train-stock train-crypto eval-stock eval-crypto plot-stock plot-crypto tb clean
 
 CONFIG    := config/default.yaml
 MODEL_DIR := models/saved
@@ -16,6 +16,8 @@ help:
 	@echo "  train-crypto   训练加密货币策略"
 	@echo "  eval-stock     评估股票模型"
 	@echo "  eval-crypto    评估加密货币模型"
+	@echo "  plot-stock     绘制股票模型的回测图表"
+	@echo "  plot-crypto    绘制加密货币模型的回测图表"
 	@echo "  tb             启动 TensorBoard"
 	@echo "  clean          清理缓存文件"
 	@echo ""
@@ -67,6 +69,18 @@ ifndef MODEL
 	$(error 请指定 MODEL，例如: make eval-crypto MODEL=models/saved/BTCUSDT_ppo)
 endif
 	uv run python evaluate.py --mode crypto --model $(MODEL) --config $(CONFIG) --episodes $(EPISODES)
+
+plot-stock:
+ifndef MODEL
+	$(error 请指定 MODEL，例如: make plot-stock MODEL=models/saved/AAPL__ppo)
+endif
+	uv run python plot_backtest.py --mode stock --model $(MODEL) --config $(CONFIG)
+
+plot-crypto:
+ifndef MODEL
+	$(error 请指定 MODEL，例如: make plot-crypto MODEL=models/saved/BTCUSDT_ppo)
+endif
+	uv run python plot_backtest.py --mode crypto --model $(MODEL) --config $(CONFIG)
 
 # ── 工具 ────────────────────────────────────────────────────────────────────
 
