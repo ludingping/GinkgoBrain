@@ -101,8 +101,8 @@ def main():
             ts = ts.dt.tz_localize("UTC")
         df_raw["timestamp"] = ts.dt.tz_convert(tz)
         
-        tf_resample = c.get("timeframe", "1d").upper()
-        if tf_resample == "1M":
+        tf_resample = c.get("timeframe", "1d").lower()
+        if tf_resample == "1m":
             df_tf = df_raw
         else:
             df_tf = resample_ohlcv(df_raw, tf_resample)
@@ -189,8 +189,8 @@ def _load_crypto_df(c: dict) -> pd.DataFrame:
         ts = ts.dt.tz_localize("UTC")
     df_raw["timestamp"] = ts.dt.tz_convert(tz)
 
-    tf_resample = c.get("timeframe", "1d").upper()
-    if tf_resample == "1M":
+    tf_resample = c.get("timeframe", "1d").lower()
+    if tf_resample == "1m":
         return df_raw
     return resample_ohlcv(df_raw, tf_resample)
 

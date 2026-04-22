@@ -46,10 +46,40 @@ from utils.signals import add_signals                    # noqa: E402
 TARGET_POSITION = {0: 0.00, 1: 0.25, 2: 0.50, 3: 0.75, 4: 1.00}
 _TRADING_DAYS_PER_YEAR = 365   # crypto, continuous
 
+_BARS_PER_YEAR = {
+    "1m": 1440 * 365, "5min": 288 * 365, "15min": 96 * 365, "30min": 48 * 365,
+    "1h": 24 * 365, "2h": 12 * 365, "4h": 6 * 365, "1d": 365,
+}
+
+
+# ─────────────────────────────────────────── risk overlays
+
+def add_risk_overlay(df: pd.DataFrame, timeframe: str,
+                     vol_window: int, regime_ma_days: int) -> pd.DataFrame:
+    """Append realized_vol_ann and regime_ok columns; computed on full df so
+    slicing downstream inherits warmed-up values."""
+    df = df.copy()
+    bars_per_year = _BARS_PER_YEAR.get(timeframe, 24 * 365)
+
+    log_ret = np.log(df["close"] / df["close"].shift(1))
+    df["realized_vol_ann"] = (
+        log_ret.rolling(vol_window).std() * np.sqrt(bars_per_year)
+    ).bfill().fillna(0.6)
+
+    daily_close = df.set_index("timestamp")["close"].resample("1D").last().dropna()
+    sma = daily_close.rolling(regime_ma_days).mean()
+    regime_ok_daily = (daily_close > sma).astype(int)
+    df["regime_ok"] = (
+        regime_ok_daily.reindex(pd.DatetimeIndex(df["timestamp"]), method="ffill")
+        .fillna(0).astype(int).values
+    )
+    return df
+
 
 # ─────────────────────────────────────────── data
 
-def load_data(cfg: dict, test_start: str | None) -> pd.DataFrame:
+def load_data(cfg: dict, test_start: str | None, test_end: str | None = None,
+              vol_window: int = 168, regime_ma_days: int = 200) -> pd.DataFrame:
     c = cfg["crypto"]
     tz = c.get("timezone", "Asia/Shanghai")
     start_utc = pd.Timestamp(c["start_date"], tz=tz).tz_convert("UTC").isoformat()
@@ -65,17 +95,22 @@ def load_data(cfg: dict, test_start: str | None) -> pd.DataFrame:
     if ts.dt.tz is None:
         ts = ts.dt.tz_localize("UTC")
     df_raw["timestamp"] = ts.dt.tz_convert(tz)
-    df_tf = resample_ohlcv(df_raw, c.get("timeframe", "1d").upper())
+    timeframe = c.get("timeframe", "1d").lower()
+    df_tf = resample_ohlcv(df_raw, timeframe)
     df = add_indicators(df_tf)
     df = add_signals(df)
+    df = add_risk_overlay(df, timeframe, vol_window, regime_ma_days)
 
+    tz_ = c.get("timezone", "Asia/Shanghai")
     if test_start:
-        tz_ = c.get("timezone", "Asia/Shanghai")
         cut = pd.Timestamp(test_start, tz=tz_)
         bt_df = df[df["timestamp"] >= cut].reset_index(drop=True)
     else:
         split = int(len(df) * c.get("train_ratio", 0.80))
         bt_df = df.iloc[split:].reset_index(drop=True)
+    if test_end:
+        end_cut = pd.Timestamp(test_end, tz=tz_)
+        bt_df = bt_df[bt_df["timestamp"] < end_cut].reset_index(drop=True)
 
     print(f"Backtest period: {bt_df['timestamp'].iloc[0]} → "
           f"{bt_df['timestamp'].iloc[-1]} ({len(bt_df)} bars)")
@@ -89,18 +124,32 @@ def run_backtest(
     bt_df: pd.DataFrame,
     signal_cols: list[str],
     commission: float = 0.001,
+    position_mode: str = "discrete",
+    position_scale: float = 1.0,
+    vol_target: float = 0.0,
+    use_regime_gate: bool = False,
+    rebalance_threshold: float = 0.01,
 ) -> tuple[list[dict], list[dict], pd.DataFrame]:
     """
     Return (steps_log, trades_log, equity_df).
 
-    equity_df has columns: timestamp, portfolio_value, position_ratio, close
+    position_mode:
+      - "discrete": map predicted Sharpe through config thresholds to 5 buckets
+        {0, 0.25, 0.5, 0.75, 1.0}
+      - "continuous": target_ratio = clip(predicted_sharpe / position_scale, 0, 1)
+
+    Risk overlays (applied after raw ratio):
+      - vol_target > 0: scale by min(vol_target / realized_vol_ann, 1.0)
+      - use_regime_gate: force ratio to 0 when regime_ok == 0
     """
     close = bt_df["close"].values
     n = len(bt_df)
 
-    # Predict positions for the whole test set at once
     positions_series = combiner.predict(bt_df, signal_cols)
     sharpe_series = combiner.predict_sharpe(bt_df, signal_cols)
+    target_ratios = np.zeros(n, dtype=float)
+    realized_vol = bt_df["realized_vol_ann"].values if "realized_vol_ann" in bt_df.columns else np.full(n, 0.6)
+    regime_ok = bt_df["regime_ok"].values if "regime_ok" in bt_df.columns else np.ones(n, dtype=int)
 
     # SHAP for every step
     X = bt_df[signal_cols].values.astype(np.float32)
@@ -116,30 +165,46 @@ def run_backtest(
     trade_idx = 0
 
     for i in range(n):
-        action = int(positions_series.iloc[i])
-        target_ratio = TARGET_POSITION[action]
+        if position_mode == "continuous":
+            raw_ratio = float(np.clip(sharpe_series.iloc[i] / position_scale, 0.0, 1.0))
+            action = -1
+        else:
+            action = int(positions_series.iloc[i])
+            raw_ratio = TARGET_POSITION[action]
+
+        vol_scale = 1.0
+        if vol_target > 0.0:
+            rv = float(realized_vol[i])
+            vol_scale = min(vol_target / max(rv, 1e-4), 1.0)
+        regime_scale = 1.0 if (not use_regime_gate or regime_ok[i] == 1) else 0.0
+        target_ratio = raw_ratio * vol_scale * regime_scale
+
         price = float(close[i])
         shap_i = {col: round(float(shap_vals[i, j]), 6)
                   for j, col in enumerate(signal_cols)}
         ts_str = str(bt_df["timestamp"].iloc[i]) if "timestamp" in bt_df.columns else ""
 
-        # Rebalance cost
+        # Deadband rebalance: only move to target when delta exceeds threshold
         delta = abs(target_ratio - position_ratio)
-        if delta > 0.01:
+        if delta >= rebalance_threshold:
             cost = portfolio * delta * commission
             portfolio -= cost
+            effective_ratio = target_ratio
         else:
             cost = 0.0
+            effective_ratio = position_ratio
+
+        target_ratios[i] = effective_ratio
 
         # Price return for one bar (using next bar's close; last bar stays flat)
         if i < n - 1:
             ret = float(close[i + 1]) / price - 1
         else:
             ret = 0.0
-        portfolio *= 1 + target_ratio * ret
+        portfolio *= 1 + effective_ratio * ret
 
         equity[i] = portfolio
-        position_ratio = target_ratio
+        position_ratio = effective_ratio
 
         sig_vals = {col: round(float(bt_df[col].iloc[i]), 6)
                     for col in signal_cols}
@@ -149,7 +214,7 @@ def run_backtest(
             "timestamp": ts_str,
             "price": price,
             "action": action,
-            "target_ratio": target_ratio,
+            "target_ratio": effective_ratio,
             "predicted_sharpe": round(float(sharpe_series.iloc[i]), 4),
             "signals": sig_vals,
             "shap_values": shap_i,
@@ -159,10 +224,10 @@ def run_backtest(
         }
         steps_log.append(record)
 
-        # Trade tracking
+        # Trade tracking (only when a rebalance actually executed)
         prev_ratio = (steps_log[-2]["target_ratio"] if i > 0
                       else 0.0)
-        if target_ratio != prev_ratio:
+        if effective_ratio != prev_ratio:
             if open_trade is not None:
                 entry_val = open_trade["entry_portfolio"]
                 pnl_pct = (portfolio - entry_val) / max(entry_val, 1e-8)
@@ -170,7 +235,7 @@ def run_backtest(
                     "exit_step": i,
                     "exit_timestamp": ts_str,
                     "exit_price": price,
-                    "exit_target": target_ratio,
+                    "exit_target": effective_ratio,
                     "duration_bars": i - open_trade["entry_step"],
                     "pnl_pct": pnl_pct,
                     "exit_portfolio": portfolio,
@@ -182,13 +247,13 @@ def run_backtest(
                 trades_log.append(open_trade)
                 trade_idx += 1
 
-            if target_ratio > 0.0 or (i > 0 and prev_ratio > 0.0):
+            if effective_ratio > 0.0 or (i > 0 and prev_ratio > 0.0):
                 open_trade = {
                     "trade_id": trade_idx,
                     "entry_step": i,
                     "entry_timestamp": ts_str,
                     "entry_price": price,
-                    "entry_target": target_ratio,
+                    "entry_target": effective_ratio,
                     "from_ratio": prev_ratio,
                     "entry_portfolio": portfolio,
                     "entry_shap": shap_i,
@@ -197,7 +262,7 @@ def run_backtest(
     equity_df = pd.DataFrame({
         "timestamp": bt_df["timestamp"].values,
         "portfolio_value": equity,
-        "position_ratio": [TARGET_POSITION[int(p)] for p in positions_series],
+        "position_ratio": target_ratios,
         "close": close,
     })
     return steps_log, trades_log, equity_df
@@ -380,7 +445,22 @@ def main() -> int:
     parser.add_argument("--config", type=Path,
                         default=Path("config/stage4_1d_gbdt.yaml"))
     parser.add_argument("--test-start", default=None)
+    parser.add_argument("--test-end", default=None)
     parser.add_argument("--commission", type=float, default=0.001)
+    parser.add_argument("--position-mode", choices=["discrete", "continuous"],
+                        default="discrete")
+    parser.add_argument("--position-scale", type=float, default=1.0,
+                        help="In continuous mode, target_ratio = clip(pred_sharpe / scale, 0, 1)")
+    parser.add_argument("--vol-target", type=float, default=0.0,
+                        help="Annualized vol target; 0 disables. e.g. 0.20 for 20%")
+    parser.add_argument("--vol-window", type=int, default=168,
+                        help="Rolling window (bars) for realized vol")
+    parser.add_argument("--regime-gate", action="store_true",
+                        help="Force position to 0 when close < daily SMA")
+    parser.add_argument("--regime-ma-days", type=int, default=200,
+                        help="Daily SMA window for regime gate")
+    parser.add_argument("--rebalance-threshold", type=float, default=0.01,
+                        help="Deadband: skip rebalance when |target - current| < this")
     parser.add_argument("--run-name", default=None)
     args = parser.parse_args()
 
@@ -400,7 +480,8 @@ def main() -> int:
     print(f"Loaded {len(signal_cols)} signals")
 
     # Load data
-    bt_df = load_data(cfg, args.test_start)
+    bt_df = load_data(cfg, args.test_start, args.test_end,
+                      vol_window=args.vol_window, regime_ma_days=args.regime_ma_days)
     missing = [s for s in signal_cols if s not in bt_df.columns]
     if missing:
         print(f"ERROR: missing signal columns: {missing}", file=sys.stderr)
@@ -414,7 +495,10 @@ def main() -> int:
 
     # Backtest
     steps_log, trades_log, equity_df = run_backtest(
-        combiner, bt_df, signal_cols, commission=args.commission
+        combiner, bt_df, signal_cols, commission=args.commission,
+        position_mode=args.position_mode, position_scale=args.position_scale,
+        vol_target=args.vol_target, use_regime_gate=args.regime_gate,
+        rebalance_threshold=args.rebalance_threshold,
     )
     metrics = compute_metrics(equity_df, trades_log)
 

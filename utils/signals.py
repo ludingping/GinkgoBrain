@@ -129,6 +129,47 @@ def add_signals(df: pd.DataFrame) -> pd.DataFrame:
     df["sig_regime_drawdown"] = (close / rolling_max - 1.0).clip(-1.0, 0.0)
     df["sig_regime_return_60"] = znorm(close.pct_change(60))
 
+    # ─── Multi-timeframe context (higher-TF signals broadcast to this TF) ──
+    # On 4h/1d data these will approximately duplicate the existing trend/regime
+    # signals; signal_elimination's correlation filter handles the dedup.
+    if "timestamp" in df.columns and len(df) > 100:
+        idx = pd.DatetimeIndex(df["timestamp"])
+        df_ts = df.set_index("timestamp")
+
+        ohlc_4h = df_ts["close"].resample("4h", closed="left", label="left").last().dropna()
+        ema9_4h = ohlc_4h.ewm(span=9, adjust=False).mean()
+        ema21_4h = ohlc_4h.ewm(span=21, adjust=False).mean()
+        trend_4h = np.sign(ema9_4h - ema21_4h)
+        df["sig_mtf_4h_trend"] = trend_4h.reindex(idx, method="ffill").fillna(0.0).values
+
+        ohlc_1d = df_ts["close"].resample("1d", closed="left", label="left").last().dropna()
+        ret_60_1d = ohlc_1d.pct_change(60)
+        regime_1d = znorm(ret_60_1d)
+        df["sig_mtf_1d_regime"] = regime_1d.reindex(idx, method="ffill").fillna(0.0).values
+    else:
+        df["sig_mtf_4h_trend"] = 0.0
+        df["sig_mtf_1d_regime"] = 0.0
+
+    # ─── Intra-bar microstructure (high-frequency candle shape) ───────
+    hl_range = (df["high"] - df["low"]).replace(0, np.nan)
+    df["sig_hf_range_position"] = (2.0 * (close - df["low"]) / hl_range - 1.0).clip(-1, 1)
+    df["sig_hf_body_ratio"] = ((close - df["open"]) / hl_range).clip(-1, 1)
+
+    vol_mean_24 = df["volume"].rolling(24).mean()
+    vol_std_24 = df["volume"].rolling(24).std() + 1e-8
+    vol_z_24 = (df["volume"] - vol_mean_24) / vol_std_24
+    df["sig_hf_vol_zscore_24"] = vol_z_24.clip(-3, 3) / 3
+
+    # ─── Short-horizon mean reversion (tighter than 60-bar regime) ────
+    ema_24 = close.ewm(span=24, adjust=False).mean()
+    dev_atr = (close - ema_24) / (df["atr"] + 1e-8)
+    df["sig_mr_deviation_atr"] = dev_atr.clip(-3, 3) / 3
+
+    rsi_extreme = pd.Series(0.0, index=df.index, dtype=float)
+    rsi_extreme[df["rsi"] < 25] = 1.0
+    rsi_extreme[df["rsi"] > 75] = -1.0
+    df["sig_mr_rsi_extreme"] = rsi_extreme
+
     # ─── Final: fill warmup NaN with 0 (neutral) ──────────────────────
     sig_cols = [c for c in df.columns if c.startswith("sig_")]
     df[sig_cols] = df[sig_cols].fillna(0.0)

@@ -1,0 +1,43 @@
+# Stage 2 — 1h signal-layered PPO.
+# 基于 stage2_4h_signal.yaml，将 timeframe 改为 1h，同视野 window_size 放大到 96。
+# Usage: uv run python train.py --config config/stage2_1h_signal.yaml --paradigm signal_layered
+paradigm: signal_layered
+
+training:
+  algo: ppo
+  policy: MlpPolicy
+  total_timesteps: 1_000_000   # v1 在 380k 达峰后坍缩；砍到 1M 对齐 4h 参考
+  n_envs: 8
+  backend: sb3
+  algo_kwargs:
+    learning_rate: 1.5e-4
+    gamma: 0.995
+    n_steps: 1024
+    batch_size: 512
+    n_epochs: 10
+    gae_lambda: 0.95
+    clip_range: 0.2
+    ent_coef: 0.05
+  action_masking: false
+
+env:
+  window_size: 96              # 1h × 96 = 4 天，与 4h×24 同视野
+  initial_balance: 10000.0
+  commission: 0.0005
+  risk_aversion_coef: 0.5
+  excess_return_coef: 0.5
+  stop_atr_mult: 2.0
+  stop_cooldown_steps: 6       # 保持约 6 小时冷却（对应 4h 配置的 3 步 = 12 小时的一半，更贴近 1h 节奏）
+  random_start: true
+
+signals:
+  config_path: config/signals_v1_1h.yaml
+
+crypto:
+  symbol: "BTC/USDT"
+  timeframe: "1h"
+  start_date: "2022-01-01 00:00:00"
+  end_date: "2026-04-13 00:00:00"
+  timezone: "Asia/Shanghai"
+  db_table: "public.crypto_kline_binance"
+  train_ratio: 0.75

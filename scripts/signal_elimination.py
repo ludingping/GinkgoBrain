@@ -33,6 +33,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from agents.ppo_shared import resample_ohlcv  # noqa: E402
+from utils.db import read_ohlcv  # noqa: E402
 from utils.indicators import add_indicators  # noqa: E402
 from utils.signals import (  # noqa: E402
     SIGNAL_WARMUP_WINDOW,
@@ -52,10 +54,15 @@ STATE_ONLY_SIGNALS = {
 DEFAULT_CACHE = (
     REPO_ROOT / "data" / "cache" / "BTCUSDT_4h_2020-01-01_2024-07-01.parquet"
 )
-PERIODS_PER_YEAR = 6 * 365  # 4h → 6 bars/day
+# bars/year by timeframe — used for Sharpe annualization under --config.
+BARS_PER_YEAR = {
+    "1m": 1440 * 365, "5min": 288 * 365, "15min": 96 * 365, "30min": 48 * 365,
+    "1h": 24 * 365, "2h": 12 * 365, "4h": 6 * 365, "1d": 365,
+}
+PERIODS_PER_YEAR = BARS_PER_YEAR["4h"]  # legacy default for --cache path
 
 
-def backtest_signal(sig: pd.Series, log_ret: pd.Series) -> float:
+def backtest_signal(sig: pd.Series, log_ret: pd.Series, periods_per_year: int) -> float:
     """Naive long-only backtest Sharpe per §4.3 of design doc."""
     sig_prev = sig.shift(1).fillna(0.0)
     pos = np.zeros(len(sig_prev), dtype=float)
@@ -70,15 +77,39 @@ def backtest_signal(sig: pd.Series, log_ret: pd.Series) -> float:
     mu, sd = strat_ret.mean(), strat_ret.std()
     if sd < 1e-12:
         return 0.0
-    return float(mu / sd * np.sqrt(PERIODS_PER_YEAR))
+    return float(mu / sd * np.sqrt(periods_per_year))
 
 
-def compute_stats(df: pd.DataFrame, sig_cols: list[str]) -> tuple[dict, pd.DataFrame]:
+def compute_stats(
+    df: pd.DataFrame, sig_cols: list[str], periods_per_year: int,
+) -> tuple[dict, pd.DataFrame]:
     """Return (sharpe_by_signal, correlation_matrix)."""
     log_ret = np.log(df["close"] / df["close"].shift(1)).fillna(0.0)
-    sharpe = {col: backtest_signal(df[col], log_ret) for col in sig_cols}
+    sharpe = {col: backtest_signal(df[col], log_ret, periods_per_year) for col in sig_cols}
     corr = df[sig_cols].corr(method="pearson")
     return sharpe, corr
+
+
+def load_df_from_config(config_path: Path) -> tuple[pd.DataFrame, str]:
+    """Mirror signal_linear_baseline.load_df_from_config: DB → resampled df."""
+    with config_path.open(encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    c = cfg["crypto"]
+    tz = c.get("timezone", "Asia/Shanghai")
+    start_utc = pd.Timestamp(c["start_date"], tz=tz).tz_convert("UTC").isoformat()
+    end_utc = pd.Timestamp(c["end_date"], tz=tz).tz_convert("UTC").isoformat()
+    df_raw = read_ohlcv(
+        c["symbol"], start=start_utc, end=end_utc,
+        table=c.get("db_table", "public.crypto_kline_binance"),
+        only_closed=True,
+    )
+    ts = df_raw["timestamp"]
+    if ts.dt.tz is None:
+        ts = ts.dt.tz_localize("UTC")
+    df_raw["timestamp"] = ts.dt.tz_convert(tz)
+    tf = c.get("timeframe", "1d").lower()
+    df_tf = df_raw if tf == "1m" else resample_ohlcv(df_raw, tf)
+    return df_tf, tf
 
 
 def apply_elimination(
@@ -138,7 +169,8 @@ def write_yaml(
     kept: list[str],
     eliminated: list[dict],
     sharpe: dict[str, float],
-    cache_file: Path,
+    source_tag: str,
+    periods_per_year: int,
     sharpe_threshold: float,
     corr_threshold: float,
 ) -> None:
@@ -146,9 +178,9 @@ def write_yaml(
         "version": 1,
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "source": {
-            "cache_file": str(cache_file.relative_to(REPO_ROOT)),
+            "tag": source_tag,
             "warmup_window": SIGNAL_WARMUP_WINDOW,
-            "periods_per_year": PERIODS_PER_YEAR,
+            "periods_per_year": periods_per_year,
         },
         "thresholds": {
             "sharpe_min": sharpe_threshold,
@@ -206,33 +238,57 @@ def write_log(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=None,
+                        help="Training-style yaml (e.g. config/stage2_1h_signal.yaml). "
+                             "When set, loads from DB and resamples; --cache is ignored.")
     parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE,
-                        help="Cached 4h OHLCV parquet (from signal_sanity.ipynb)")
+                        help="Cached 4h OHLCV parquet (legacy path, ignored if --config set)")
     parser.add_argument("--sharpe-threshold", type=float, default=-0.2)
     parser.add_argument("--corr-threshold", type=float, default=0.95)
-    parser.add_argument("--output", type=Path,
-                        default=REPO_ROOT / "config" / "signals_v1.yaml")
-    parser.add_argument("--log", type=Path,
-                        default=REPO_ROOT / "config" / "signal_elimination_log.md")
+    parser.add_argument("--output", type=Path, default=None,
+                        help="Output signals yaml. Default: config/signals_v1.yaml for "
+                             "--cache, config/signals_v1_{tf}.yaml for --config")
+    parser.add_argument("--log", type=Path, default=None,
+                        help="Output decision log. Default matches --output naming.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print decisions but do not write files")
     args = parser.parse_args()
 
-    if not args.cache.exists():
-        print(f"ERROR: cache file not found: {args.cache}", file=sys.stderr)
-        print("Run notebooks/signal_sanity.ipynb first to populate the cache.",
-              file=sys.stderr)
-        return 1
+    if args.config is not None:
+        if not args.config.exists():
+            print(f"ERROR: config not found: {args.config}", file=sys.stderr)
+            return 1
+        df_tf, tf = load_df_from_config(args.config)
+        if tf not in BARS_PER_YEAR:
+            print(f"ERROR: unknown timeframe '{tf}'", file=sys.stderr)
+            return 1
+        periods_per_year = BARS_PER_YEAR[tf]
+        source_tag = f"config:{args.config.name} (tf={tf})"
+        print(f"DB load: timeframe={tf}, bars={len(df_tf)}, bars/year={periods_per_year}")
+        df_ind = add_indicators(df_tf)
+        df = add_signals(df_ind)
+        output_path = args.output or REPO_ROOT / "config" / f"signals_v1_{tf}.yaml"
+        log_path = args.log or REPO_ROOT / "config" / f"signal_elimination_log_{tf}.md"
+    else:
+        if not args.cache.exists():
+            print(f"ERROR: cache file not found: {args.cache}", file=sys.stderr)
+            print("Run notebooks/signal_sanity.ipynb first to populate the cache.",
+                  file=sys.stderr)
+            return 1
+        print(f"Loading cached 4h OHLCV: {args.cache}")
+        df_raw = pd.read_parquet(args.cache)
+        df_ind = add_indicators(df_raw)
+        df = add_signals(df_ind)
+        periods_per_year = PERIODS_PER_YEAR
+        source_tag = f"cache:{args.cache.name}"
+        output_path = args.output or REPO_ROOT / "config" / "signals_v1.yaml"
+        log_path = args.log or REPO_ROOT / "config" / "signal_elimination_log.md"
 
-    print(f"Loading cached 4h OHLCV: {args.cache}")
-    df_raw = pd.read_parquet(args.cache)
-    df_ind = add_indicators(df_raw)
-    df = add_signals(df_ind)
     df_post = df.iloc[SIGNAL_WARMUP_WINDOW:].reset_index(drop=True)
     sig_cols = signal_columns(df_post)
     print(f"Rows post-warmup: {len(df_post):,}, signals: {len(sig_cols)}")
 
-    sharpe, corr = compute_stats(df_post, sig_cols)
+    sharpe, corr = compute_stats(df_post, sig_cols, periods_per_year)
     kept, eliminated = apply_elimination(
         sig_cols, sharpe, corr,
         sharpe_threshold=args.sharpe_threshold,
@@ -253,12 +309,13 @@ def main() -> int:
         print("\n--dry-run: no files written.")
         return 0
 
-    write_yaml(args.output, kept, eliminated, sharpe, args.cache,
+    write_yaml(output_path, kept, eliminated, sharpe,
+               source_tag, periods_per_year,
                args.sharpe_threshold, args.corr_threshold)
-    write_log(args.log, kept, eliminated, sharpe,
+    write_log(log_path, kept, eliminated, sharpe,
               args.sharpe_threshold, args.corr_threshold)
-    print(f"\nWrote {args.output.relative_to(REPO_ROOT)}")
-    print(f"Wrote {args.log.relative_to(REPO_ROOT)}")
+    print(f"\nWrote {output_path.relative_to(REPO_ROOT)}")
+    print(f"Wrote {log_path.relative_to(REPO_ROOT)}")
     return 0
 
 

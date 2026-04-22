@@ -1,0 +1,32 @@
+# Stage 4 — 1h GBDT Sharpe-regression combiner.
+# 基于 stage4_1d_gbdt.yaml，timeframe 改 1h，horizon=24（预测未来 1 天的 Sharpe）。
+# 使用 signals_v1_1h.yaml（含 MTF 4h trend / 1d regime 的 15 信号）。
+# Usage: uv run python train.py --config config/stage4_1h_gbdt.yaml --combiner gbdt
+paradigm: signal_layered
+
+signals:
+  config_path: config/signals_v1_1h.yaml
+
+gbdt:
+  horizon: 24             # 未来 24 根 1h ≈ 1 天风险调整收益
+  vol_floor: 1.0e-4
+  clip_range: [-5.0, 5.0]
+  thresholds: [1.0, 0.5, 0.0, -0.5]
+  train_ratio: 0.8
+  early_stopping_rounds: 30
+  lgb_params:
+    n_estimators: 500
+    max_depth: 6
+    learning_rate: 0.05
+    min_child_samples: 20
+    reg_alpha: 0.1
+    reg_lambda: 0.1
+
+crypto:
+  symbol: "BTC/USDT"
+  timeframe: "1h"
+  start_date: "2022-01-01 00:00:00"
+  end_date: "2026-04-13 00:00:00"
+  timezone: "Asia/Shanghai"
+  db_table: "public.crypto_kline_binance"
+  train_ratio: 0.80

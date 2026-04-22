@@ -24,7 +24,7 @@ crypto:
   symbol: "BTC/USDT"
   timeframe: "1d"
   start_date: "2020-01-01 00:00:00"
-  end_date: "2024-06-30 00:00:00"   # TC-D3 训练期
+  end_date: "2025-06-30 00:00:00"   # TC-D3 训练期
   timezone: "Asia/Shanghai"
   db_table: "public.crypto_kline_binance"
   train_ratio: 0.80        # 训练用前 80%，最后 20% 留做测试

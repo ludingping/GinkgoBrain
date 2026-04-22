@@ -1,0 +1,45 @@
+# Stage 2 — 5min signal-layered PPO.
+# 高频场景：样本密度约 48× 4h；训练步数、熵正则、数据截断均需调整。
+# 注意：11 个 sig_* 在 5min 粒度的预测力必须先跑 signal_linear_baseline.py 验证，
+#      AUC < 0.52 时应重新跑 signal_elimination.py 在本周期上重筛信号。
+# Usage: uv run python train.py --config config/stage2_5min_signal.yaml --paradigm signal_layered
+paradigm: signal_layered
+
+training:
+  algo: ppo
+  policy: MlpPolicy
+  total_timesteps: 5_000_000   # 5min 噪音大，需要更长训练让 PPO 收敛
+  n_envs: 8
+  backend: sb3
+  algo_kwargs:
+    learning_rate: 1.0e-4      # 降低学习率，抵抗高频噪音下的震荡
+    gamma: 0.995
+    n_steps: 1024
+    batch_size: 512
+    n_epochs: 10
+    gae_lambda: 0.95
+    clip_range: 0.15           # 更严格裁剪，防止单批噪音样本把策略拉偏
+    ent_coef: 0.08             # 更强熵正则，避免高频数据下过早 policy 坍缩
+  action_masking: false
+
+env:
+  window_size: 192             # 5min × 192 = 16 小时，兼顾视野与显存
+  initial_balance: 10000.0
+  commission: 0.0005
+  risk_aversion_coef: 0.5
+  excess_return_coef: 0.5
+  stop_atr_mult: 2.5           # 5min ATR 噪音更大，倍数抬高防过早止损
+  stop_cooldown_steps: 72      # 5min × 72 = 6 小时冷却
+  random_start: true
+
+signals:
+  config_path: config/signals_v1.yaml
+
+crypto:
+  symbol: "BTC/USDT"
+  timeframe: "5min"            # lowercase → train.py .lower() → pandas 原生识别
+  start_date: "2024-01-01 00:00:00"   # 只取近 2+ 年，控制样本规模（约 25w 根）
+  end_date: "2026-04-13 00:00:00"
+  timezone: "Asia/Shanghai"
+  db_table: "public.crypto_kline_binance"
+  train_ratio: 0.80

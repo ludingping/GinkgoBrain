@@ -43,7 +43,7 @@ from utils.signals import add_signals                                  # noqa: E
 
 # ═══════════════════════════════════════════════════════════════════ data
 
-def load_data(cfg: dict, test_start: str | None) -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_data(cfg: dict, test_start: str | None, test_end: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return (full_df_with_signals, backtest_df) based on config + optional date cut."""
     c = cfg["crypto"]
     tz = c.get("timezone", "Asia/Shanghai")
@@ -59,22 +59,21 @@ def load_data(cfg: dict, test_start: str | None) -> tuple[pd.DataFrame, pd.DataF
     if ts.dt.tz is None:
         ts = ts.dt.tz_localize("UTC")
     df_raw["timestamp"] = ts.dt.tz_convert(tz)
-    df_tf = resample_ohlcv(df_raw, c.get("timeframe", "4h").upper())
+    df_tf = resample_ohlcv(df_raw, c.get("timeframe", "4h").lower())
     df = add_indicators(df_tf)
     df = add_signals(df)
 
     if test_start:
         test_ts = pd.Timestamp(test_start, tz=tz)
         bt_df = df[df["timestamp"] >= test_ts].reset_index(drop=True)
-        print(f"Backtest period (from --test-start {test_start}): "
-              f"{bt_df['timestamp'].iloc[0]} → {bt_df['timestamp'].iloc[-1]} "
-              f"({len(bt_df)} bars)")
     else:
         split = int(len(df) * cfg["crypto"].get("train_ratio", 0.75))
         bt_df = df.iloc[split:].reset_index(drop=True)
-        print(f"Backtest period (last {100-int(cfg['crypto'].get('train_ratio',0.75)*100)}%): "
-              f"{bt_df['timestamp'].iloc[0]} → {bt_df['timestamp'].iloc[-1]} "
-              f"({len(bt_df)} bars)")
+    if test_end:
+        end_ts = pd.Timestamp(test_end, tz=tz)
+        bt_df = bt_df[bt_df["timestamp"] < end_ts].reset_index(drop=True)
+    print(f"Backtest period: {bt_df['timestamp'].iloc[0]} → "
+          f"{bt_df['timestamp'].iloc[-1]} ({len(bt_df)} bars)")
     return df, bt_df
 
 
@@ -400,6 +399,8 @@ def main() -> int:
     parser.add_argument("--test-start", default=None,
                         help="ISO date string; if set, backtest from this date. "
                              "Otherwise uses 1-train_ratio tail of dataset.")
+    parser.add_argument("--test-end", default=None,
+                        help="ISO date string; if set, exclude bars at/after this date.")
     parser.add_argument("--run-name", default=None,
                         help="Output directory under models/saved/. "
                              "Defaults to model parent dir name.")
@@ -415,7 +416,7 @@ def main() -> int:
     signal_cols = load_signal_list(cfg["signals"]["config_path"])
     print(f"Loaded {len(signal_cols)} signals")
 
-    _, bt_df = load_data(cfg, args.test_start)
+    _, bt_df = load_data(cfg, args.test_start, args.test_end)
 
     _ALLOWED = {"window_size", "initial_balance", "commission",
                 "risk_aversion_coef", "excess_return_coef",

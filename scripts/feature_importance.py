@@ -192,7 +192,7 @@ def main() -> int:
     if ts.dt.tz is None:
         ts = ts.dt.tz_localize("UTC")
     df_raw["timestamp"] = ts.dt.tz_convert(tz)
-    df_tf = resample_ohlcv(df_raw, c.get("timeframe", "4h").upper())
+    df_tf = resample_ohlcv(df_raw, c.get("timeframe", "4h").lower())
     df = add_indicators(df_tf)
     df = add_signals(df)
 

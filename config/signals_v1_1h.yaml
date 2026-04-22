@@ -1,0 +1,54 @@
+version: 1
+generated_at: '2026-04-19T11:37:58'
+source:
+  tag: config:stage2_1h_signal.yaml (tf=1h)
+  warmup_window: 100
+  periods_per_year: 8760
+thresholds:
+  sharpe_min: -0.2
+  pearson_abs_max: 0.95
+signals:
+- sig_trend_ema_cross
+- sig_trend_macd_hist
+- sig_trend_price_above_ma
+- sig_mom_stoch_state
+- sig_mom_roc_zscore
+- sig_vol_atr_pct
+- sig_vol_bb_width
+- sig_vol_bb_position
+- sig_volume_obv_slope
+- sig_regime_drawdown
+- sig_regime_return_60
+- sig_mtf_4h_trend
+- sig_mtf_1d_regime
+- sig_hf_vol_zscore_24
+- sig_mr_rsi_extreme
+eliminated:
+- signal: sig_mom_rsi_zone
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.337 < -0.2
+  sharpe: -0.3367
+- signal: sig_hf_range_position
+  reason: sharpe_below_threshold
+  detail: Sharpe=-1.157 < -0.2
+  sharpe: -1.157
+- signal: sig_hf_body_ratio
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.507 < -0.2
+  sharpe: -0.507
+- signal: sig_mr_deviation_atr
+  reason: correlation_redundancy
+  detail: '|ρ|=0.997 (+0.997) with sig_trend_price_above_ma (kept: Sharpe=+0.432 vs +0.367)'
+  sharpe: 0.3666
+- signal: sig_mom_rsi_trend
+  reason: correlation_redundancy
+  detail: '|ρ|=0.982 (+0.982) with sig_trend_price_above_ma (kept: Sharpe=+0.432 vs +0.260)'
+  sharpe: 0.2599
+- signal: sig_trend_slope_21
+  reason: correlation_redundancy
+  detail: '|ρ|=0.978 (+0.978) with sig_trend_ema_cross (kept: Sharpe=+0.320 vs +0.096)'
+  sharpe: 0.0964
+- signal: sig_volume_ratio
+  reason: correlation_redundancy
+  detail: '|ρ|=0.955 (+0.955) with sig_hf_vol_zscore_24 (kept: Sharpe=+0.029 vs +0.008)'
+  sharpe: 0.008

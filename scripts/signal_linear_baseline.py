@@ -60,6 +60,8 @@ from sklearn.metrics import (  # noqa: E402
 from sklearn.model_selection import TimeSeriesSplit  # noqa: E402
 from sklearn.preprocessing import StandardScaler  # noqa: E402
 
+from agents.ppo_shared import resample_ohlcv  # noqa: E402
+from utils.db import read_ohlcv  # noqa: E402
 from utils.indicators import add_indicators  # noqa: E402
 from utils.signals import SIGNAL_WARMUP_WINDOW, add_signals  # noqa: E402
 
@@ -70,6 +72,13 @@ DEFAULT_CACHE = (
 DEFAULT_SIGNALS = REPO_ROOT / "config" / "signals_v1.yaml"
 DEFAULT_REPORT_DIR = REPO_ROOT / "reports"
 
+# Bars-per-day by timeframe — used to auto-derive the 1-day horizon when
+# --horizon is not explicitly overridden. Keys are lowercased timeframe strings.
+_BARS_PER_DAY = {
+    "1m": 1440, "5min": 288, "15min": 96, "30min": 48,
+    "1h": 24, "2h": 12, "4h": 6, "1d": 1,
+}
+
 
 def load_signal_list(path: Path) -> list[str]:
     with path.open(encoding="utf-8") as f:
@@ -77,11 +86,38 @@ def load_signal_list(path: Path) -> list[str]:
     return list(payload["signals"])
 
 
-def build_dataset(
-    cache: Path, signal_cols: list[str], horizon: int
+def load_df_from_config(config_path: Path) -> tuple[pd.DataFrame, str]:
+    """Load + resample crypto OHLCV from DB per a training-style config yaml.
+
+    Mirrors train.py::_load_crypto_df so baseline uses the same data path as
+    training. Returns (df_tf, timeframe_lower).
+    """
+    with config_path.open(encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    c = cfg["crypto"]
+    tz = c.get("timezone", "Asia/Shanghai")
+    start_utc = pd.Timestamp(c["start_date"], tz=tz).tz_convert("UTC").isoformat()
+    end_utc = pd.Timestamp(c["end_date"], tz=tz).tz_convert("UTC").isoformat()
+
+    df_raw = read_ohlcv(
+        c["symbol"], start=start_utc, end=end_utc,
+        table=c.get("db_table", "public.crypto_kline_binance"),
+        only_closed=True,
+    )
+    ts = df_raw["timestamp"]
+    if ts.dt.tz is None:
+        ts = ts.dt.tz_localize("UTC")
+    df_raw["timestamp"] = ts.dt.tz_convert(tz)
+
+    tf = c.get("timeframe", "1d").lower()
+    df_tf = df_raw if tf == "1m" else resample_ohlcv(df_raw, tf)
+    return df_tf, tf
+
+
+def build_dataset_from_df(
+    df_raw: pd.DataFrame, signal_cols: list[str], horizon: int
 ) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
     """Return (X, y_cls, y_reg) aligned. Drops warmup + last `horizon` rows."""
-    df_raw = pd.read_parquet(cache)
     df_ind = add_indicators(df_raw)
     df = add_signals(df_ind)
     df = df.iloc[SIGNAL_WARMUP_WINDOW:].reset_index(drop=True)
@@ -98,6 +134,13 @@ def build_dataset(
     return df.loc[keep, signal_cols].reset_index(drop=True), \
            y_cls.loc[keep].reset_index(drop=True), \
            y_reg.loc[keep].reset_index(drop=True)
+
+
+def build_dataset(
+    cache: Path, signal_cols: list[str], horizon: int
+) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
+    """Parquet-cache entry point (legacy 4h path). Reads parquet then delegates."""
+    return build_dataset_from_df(pd.read_parquet(cache), signal_cols, horizon)
 
 
 def run_cv(
@@ -223,16 +266,21 @@ def write_report(
     auc_th: float, auc_floor: float,
     r2_floor: float,
     horizon: int,
-    cache_file: Path,
+    source_tag: str,
     signals_config: Path,
 ) -> None:
     rel = lambda p: str(p.relative_to(report_path.parent)).replace("\\", "/")
     lines: list[str] = []
     lines.append("# Linear Baseline Report — TC-A6\n")
     lines.append(f"- Generated: `{dt.datetime.now().isoformat(timespec='seconds')}`  ")
-    lines.append(f"- Signals config: `{signals_config.relative_to(REPO_ROOT)}` ({len(sig_cols)} features)  ")
-    lines.append(f"- Data cache: `{cache_file.relative_to(REPO_ROOT)}`  ")
-    lines.append(f"- Target horizon: **k = {horizon} bars** (4h × {horizon} = {horizon * 4}h ahead)  ")
+    sig_path = signals_config.resolve()
+    try:
+        sig_rel = sig_path.relative_to(REPO_ROOT)
+    except ValueError:
+        sig_rel = sig_path
+    lines.append(f"- Signals config: `{sig_rel}` ({len(sig_cols)} features)  ")
+    lines.append(f"- Data source: `{source_tag}`  ")
+    lines.append(f"- Target horizon: **k = {horizon} bars**  ")
     lines.append(f"- CV: TimeSeriesSplit({len(folds)} folds, no shuffle)  ")
     lines.append(f"- Iron gate: AUC mean > **{auc_th}** AND min > **{auc_floor}**  ")
     lines.append(f"- R² diagnostic: mean > **{r2_floor}** (catastrophe check, not a positive-predictive gate)\n")
@@ -276,13 +324,19 @@ def write_report(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
+    parser.add_argument("--config", type=Path, default=None,
+                        help="Training-style yaml (e.g. config/stage2_1h_signal.yaml). "
+                             "When set, loads from DB and resamples; --cache is ignored. "
+                             "Horizon auto-derived to 1 day in bars unless --horizon given.")
+    parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE,
+                        help="Parquet OHLCV cache (legacy 4h path). Ignored if --config set.")
     parser.add_argument("--signals-config", type=Path, default=DEFAULT_SIGNALS)
     parser.add_argument("--cv-splits", type=int, default=3,
                         help="TimeSeriesSplit folds; default 3 ensures each fold "
                              "has ≥~1800 training bars on the 2020-2024 BTC 4h set")
-    parser.add_argument("--horizon", type=int, default=6,
-                        help="Prediction horizon in bars (default 6 = 1 day on 4h data)")
+    parser.add_argument("--horizon", type=int, default=None,
+                        help="Prediction horizon in bars. Default: 6 for --cache path, "
+                             "or timeframe-derived 1-day equivalent for --config path.")
     parser.add_argument("--auc-threshold", type=float, default=0.52,
                         help="AUC mean must exceed this")
     parser.add_argument("--auc-floor", type=float, default=0.50,
@@ -292,9 +346,6 @@ def main() -> int:
     parser.add_argument("--report-dir", type=Path, default=DEFAULT_REPORT_DIR)
     args = parser.parse_args()
 
-    if not args.cache.exists():
-        print(f"ERROR: cache not found: {args.cache}", file=sys.stderr)
-        return 1
     if not args.signals_config.exists():
         print(f"ERROR: signals config not found: {args.signals_config}", file=sys.stderr)
         return 1
@@ -302,9 +353,31 @@ def main() -> int:
     sig_cols = load_signal_list(args.signals_config)
     print(f"Loaded {len(sig_cols)} signals from {args.signals_config.name}")
 
-    X, y_cls, y_reg = build_dataset(args.cache, sig_cols, horizon=args.horizon)
+    if args.config is not None:
+        if not args.config.exists():
+            print(f"ERROR: config not found: {args.config}", file=sys.stderr)
+            return 1
+        df_tf, tf = load_df_from_config(args.config)
+        if args.horizon is None:
+            if tf not in _BARS_PER_DAY:
+                print(f"ERROR: unknown timeframe '{tf}', pass --horizon explicitly",
+                      file=sys.stderr)
+                return 1
+            args.horizon = _BARS_PER_DAY[tf]
+        print(f"DB load: timeframe={tf}, bars={len(df_tf)}, horizon={args.horizon}")
+        X, y_cls, y_reg = build_dataset_from_df(df_tf, sig_cols, horizon=args.horizon)
+        source_tag = f"config:{args.config.name} (tf={tf})"
+    else:
+        if not args.cache.exists():
+            print(f"ERROR: cache not found: {args.cache}", file=sys.stderr)
+            return 1
+        if args.horizon is None:
+            args.horizon = 6
+        tf = "4h"   # legacy parquet cache is 4h
+        X, y_cls, y_reg = build_dataset(args.cache, sig_cols, horizon=args.horizon)
+        source_tag = f"cache:{args.cache.name}"
     print(f"Dataset: X={X.shape}, horizon={args.horizon} bars, "
-          f"y_cls balance={y_cls.mean():.3f}")
+          f"y_cls balance={y_cls.mean():.3f} | source={source_tag}")
 
     cv = run_cv(X, y_cls, y_reg, n_splits=args.cv_splits)
     v = verdict(cv["folds"],
@@ -317,18 +390,20 @@ def main() -> int:
           f"{'PASS' if v['r2_pass'] else 'FAIL'}")
     print(f"\nOverall: {'✅ PASS' if v['overall_pass'] else '❌ FAIL — Phase 2 frozen'}")
 
-    artifact_dir = args.report_dir / "signal_linear_baseline_artifacts"
+    # Per-timeframe suffix so 4h / 1h / 5min runs don't overwrite each other.
+    suffix = f"_{tf}" if args.config is not None else ""
+    artifact_dir = args.report_dir / f"signal_linear_baseline{suffix}_artifacts"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     plot_confusion(cv["last_fold"], artifact_dir / "confusion_matrix.png")
     plot_residuals(cv["last_fold"], artifact_dir / "residuals.png")
     plot_coefficients(cv["last_fold"], sig_cols, artifact_dir / "coefficients.png")
 
-    report_path = args.report_dir / "signal_linear_baseline.md"
+    report_path = args.report_dir / f"signal_linear_baseline{suffix}.md"
     write_report(report_path, artifact_dir, sig_cols, cv["folds"], v,
                  args.auc_threshold, args.auc_floor,
                  args.r2_floor,
                  args.horizon,
-                 args.cache, args.signals_config)
+                 source_tag, args.signals_config)
     print(f"\nWrote {report_path.relative_to(REPO_ROOT)}")
     print(f"Wrote {artifact_dir.relative_to(REPO_ROOT)}/")
 
