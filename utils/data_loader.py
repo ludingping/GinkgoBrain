@@ -1,4 +1,6 @@
 """Data loading utilities for stocks (yfinance), crypto (ccxt), and market sentiment."""
+from __future__ import annotations
+
 import pandas as pd
 import yfinance as yf
 
@@ -95,3 +97,79 @@ def load_fng(limit: int | str = 365) -> pd.DataFrame:
             .sort_values("date")
             .reset_index(drop=True))
     return df
+
+
+# =============================================================================
+# 合约数据 merge —— 把 Spider 侧 funding / OI / liquidation 对齐到 OHLCV 主表
+#
+# 对齐规则（设计文档 §7.2）：
+#   - K 线为主表，timestamp 为 join key
+#   - funding 5min → merge_asof backward（最新已知的 funding 给本 bar）
+#   - OI 5min → merge_asof backward（精确 join，5min 对齐时相当于直接匹配）
+#   - liquidation 15min 桶 → merge_asof backward（广播到 3 个 5min bar）
+# =============================================================================
+
+def _asof_ordered(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.sort_values("timestamp").reset_index(drop=True)
+    return out
+
+
+def merge_contract_data(
+    df_ohlcv: pd.DataFrame,
+    *,
+    df_funding: pd.DataFrame | None = None,
+    df_oi: pd.DataFrame | None = None,
+    df_liq: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """
+    Broadcast funding / OI / liquidation data onto the OHLCV base table.
+
+    Uses ``merge_asof(..., direction='backward')`` so each OHLCV bar picks up
+    the most recent contract observation at-or-before its timestamp. Contract
+    columns are NaN until the first observation arrives — callers are expected
+    to let signal-level fillna(0) handle that (see ``add_contract_signals``).
+
+    Args:
+        df_ohlcv: DataFrame with a ``timestamp`` column (ascending).
+        df_funding: from :func:`utils.db.read_funding` or None
+        df_oi: from :func:`utils.db.read_open_interest` or None
+        df_liq: from :func:`utils.db.read_liquidation_agg` or None
+
+    Returns:
+        A new DataFrame with extra columns (all optional; missing inputs skipped):
+          - ``funding_rate`` (+ ``funding_origin``)
+          - ``sum_open_interest``, ``sum_open_interest_value``
+          - ``liq_long_usd``, ``liq_short_usd``, ``liq_total_usd``
+    """
+    if "timestamp" not in df_ohlcv.columns:
+        raise ValueError("df_ohlcv must have a 'timestamp' column")
+
+    base = df_ohlcv.sort_values("timestamp").reset_index(drop=True).copy()
+
+    if df_funding is not None and not df_funding.empty:
+        f = _asof_ordered(df_funding)[["timestamp", "funding_rate", "origin"]].copy()
+        f["funding_rate"] = pd.to_numeric(f["funding_rate"], errors="coerce")
+        f = f.rename(columns={"origin": "funding_origin"})
+        base = pd.merge_asof(base, f, on="timestamp", direction="backward")
+
+    if df_oi is not None and not df_oi.empty:
+        oi = _asof_ordered(df_oi)[
+            ["timestamp", "sum_open_interest", "sum_open_interest_value"]
+        ].copy()
+        oi["sum_open_interest"] = pd.to_numeric(oi["sum_open_interest"], errors="coerce")
+        oi["sum_open_interest_value"] = pd.to_numeric(
+            oi["sum_open_interest_value"], errors="coerce",
+        )
+        base = pd.merge_asof(base, oi, on="timestamp", direction="backward")
+
+    if df_liq is not None and not df_liq.empty:
+        liq = _asof_ordered(df_liq)[
+            ["timestamp", "liq_long_usd", "liq_short_usd", "liq_total_usd"]
+        ].copy()
+        for col in ("liq_long_usd", "liq_short_usd", "liq_total_usd"):
+            liq[col] = pd.to_numeric(liq[col], errors="coerce")
+        base = pd.merge_asof(base, liq, on="timestamp", direction="backward")
+
+    return base

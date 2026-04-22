@@ -180,3 +180,154 @@ def add_signals(df: pd.DataFrame) -> pd.DataFrame:
 def signal_columns(df: pd.DataFrame) -> list[str]:
     """Return the list of sig_* columns present in the DataFrame, in order."""
     return [c for c in df.columns if c.startswith("sig_")]
+
+
+# =============================================================================
+# Contract signals (funding / OI / liquidation)
+#
+# 6 signals introduced by docs/GinkgoSpider/合约数据-采集与信号-设计.md §7.1.
+# These are computed from columns merged by utils.data_loader.merge_contract_data:
+#   funding_rate, sum_open_interest, liq_long_usd, liq_short_usd
+#
+# All 6 outputs honor the same value-range contract ([-1, 1]); warmup NaN is
+# filled with 0 (neutral).
+#
+# ``add_contract_signals`` is intentionally a separate entry point from
+# ``add_signals`` so the existing 22-signal pipeline keeps its invariants.
+# Missing contract columns → the corresponding sig_* is set to 0 (neutral),
+# so callers with partial data (e.g. SUI/ASTER before listing) still produce
+# a uniform-shape DataFrame.
+# =============================================================================
+
+CONTRACT_SIGNAL_COLS = [
+    "sig_funding_current",
+    "sig_funding_trend",
+    "sig_oi_change_zscore",
+    "sig_liq_long_zscore",
+    "sig_liq_short_zscore",
+    "sig_liq_imbalance",
+]
+
+# 默认假设输入为 5min K 线；将 24h/1h 等窗口按 5min bars 换算
+BARS_PER_HOUR_5MIN = 12
+BARS_PER_DAY_5MIN = 288
+
+
+def compute_sig_funding_current(
+    funding_rate: pd.Series, window: int = 200,
+) -> pd.Series:
+    """当前 funding 值 → [-1, 1]。Rolling z-score 抗波动率 regime 漂移。"""
+    return znorm(funding_rate, window=window)
+
+
+def compute_sig_funding_trend(
+    funding_rate: pd.Series,
+    mean_window: int = BARS_PER_DAY_5MIN,
+    znorm_window: int = 200,
+) -> pd.Series:
+    """24h funding 均值趋势 → z-score。正值表示过去 24h 多头付费多头趋势延续。"""
+    avg = funding_rate.rolling(mean_window, min_periods=1).mean()
+    return znorm(avg, window=znorm_window)
+
+
+def compute_sig_oi_change_zscore(
+    open_interest: pd.Series,
+    roll: int = BARS_PER_HOUR_5MIN,
+    znorm_window: int = 200,
+) -> pd.Series:
+    """OI 变化率（12 根 5min = 1h 滚动均值）z-score。OI 快速增加 → 杠杆进场。"""
+    pct = open_interest.pct_change()
+    smoothed = pct.rolling(roll, min_periods=1).mean()
+    return znorm(smoothed, window=znorm_window)
+
+
+def compute_sig_liq_long_zscore(
+    liq_long_usd: pd.Series, window: int = 100,
+) -> pd.Series:
+    """多头爆仓量 z-score。极大值表示多头被动出清。"""
+    return znorm(liq_long_usd, window=window)
+
+
+def compute_sig_liq_short_zscore(
+    liq_short_usd: pd.Series, window: int = 100,
+) -> pd.Series:
+    """空头爆仓量 z-score。"""
+    return znorm(liq_short_usd, window=window)
+
+
+def compute_sig_liq_imbalance(
+    liq_long_usd: pd.Series,
+    liq_short_usd: pd.Series,
+    epsilon_window: int = 96,
+    epsilon_ratio: float = 0.1,
+) -> pd.Series:
+    """
+    爆仓不平衡（long - short） / (long + short + ε)，带 Laplace 平滑。
+
+    ε = ``epsilon_ratio`` × rolling_mean(long + short, ``epsilon_window``)
+      - 低流动性 / 低成交量时段：总量远低于 24h 均值 → ε 主导分母，信号衰减趋 0
+      - 高活跃时段：总量远大于 24h 均值 → ε 可忽略，信号 ≈ 原公式
+
+    默认 window=96 对应 15min bucket × 4/h × 24h。若输入是 5min K 线频率，
+    调用方需先把 liq 列 broadcast 到 5min（由 merge_contract_data 完成），
+    此处 window 代表"15min 桶数"，不是 5min 行数。
+
+    返回值域 [-1, 1]。
+    """
+    total = (liq_long_usd.fillna(0.0) + liq_short_usd.fillna(0.0))
+    # ε 的 rolling mean 带 min_periods=1，冷启动时用实际已有样本均值
+    ma = total.rolling(epsilon_window, min_periods=1).mean()
+    eps = epsilon_ratio * ma
+    denom = total + eps
+    # 极端边界：整个窗口都是 0 → denom=0 → 返回 0
+    diff = (liq_long_usd.fillna(0.0) - liq_short_usd.fillna(0.0))
+    out = diff / denom.where(denom > 0, np.nan)
+    out = out.fillna(0.0).clip(-1.0, 1.0)
+    return out
+
+
+def add_contract_signals(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Append 6 contract-market signals to ``df``. Operates in-place on a copy.
+
+    Required optional columns on ``df`` (any subset — missing ones mean the
+    corresponding sig_* column is all-zero neutral):
+      - ``funding_rate``               → sig_funding_current, sig_funding_trend
+      - ``sum_open_interest``          → sig_oi_change_zscore
+      - ``liq_long_usd``/liq_short_usd → sig_liq_{long,short}_zscore,
+                                         sig_liq_imbalance
+
+    Warmup NaN filled with 0 (neutral), consistent with ``add_signals``.
+    """
+    df = df.copy()
+    n = len(df)
+    zeros = pd.Series(0.0, index=df.index, dtype=float)
+
+    if "funding_rate" in df.columns:
+        fr = pd.to_numeric(df["funding_rate"], errors="coerce")
+        df["sig_funding_current"] = compute_sig_funding_current(fr)
+        df["sig_funding_trend"] = compute_sig_funding_trend(fr)
+    else:
+        df["sig_funding_current"] = zeros
+        df["sig_funding_trend"] = zeros
+
+    if "sum_open_interest" in df.columns:
+        oi = pd.to_numeric(df["sum_open_interest"], errors="coerce")
+        df["sig_oi_change_zscore"] = compute_sig_oi_change_zscore(oi)
+    else:
+        df["sig_oi_change_zscore"] = zeros
+
+    has_liq = "liq_long_usd" in df.columns and "liq_short_usd" in df.columns
+    if has_liq:
+        long_ = pd.to_numeric(df["liq_long_usd"], errors="coerce").fillna(0.0)
+        short_ = pd.to_numeric(df["liq_short_usd"], errors="coerce").fillna(0.0)
+        df["sig_liq_long_zscore"] = compute_sig_liq_long_zscore(long_)
+        df["sig_liq_short_zscore"] = compute_sig_liq_short_zscore(short_)
+        df["sig_liq_imbalance"] = compute_sig_liq_imbalance(long_, short_)
+    else:
+        df["sig_liq_long_zscore"] = zeros
+        df["sig_liq_short_zscore"] = zeros
+        df["sig_liq_imbalance"] = zeros
+
+    df[CONTRACT_SIGNAL_COLS] = df[CONTRACT_SIGNAL_COLS].fillna(0.0)
+    return df
