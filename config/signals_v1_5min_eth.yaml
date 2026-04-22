@@ -1,0 +1,54 @@
+version: 1
+generated_at: '2026-04-22T15:21:16'
+source:
+  tag: config:stage2_5min_eth_signal.yaml (tf=5min)
+  warmup_window: 100
+  periods_per_year: 105120
+thresholds:
+  sharpe_min: -0.2
+  pearson_abs_max: 0.95
+signals:
+- sig_trend_macd_hist
+- sig_trend_price_above_ma
+- sig_trend_slope_21
+- sig_mom_stoch_state
+- sig_vol_atr_pct
+- sig_vol_bb_width
+- sig_vol_bb_position
+- sig_volume_obv_slope
+- sig_volume_ratio
+- sig_regime_drawdown
+- sig_regime_return_60
+- sig_mtf_4h_trend
+- sig_mtf_1d_regime
+- sig_hf_vol_zscore_24
+- sig_mr_rsi_extreme
+eliminated:
+- signal: sig_mom_rsi_zone
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.492 < -0.2
+  sharpe: -0.4923
+- signal: sig_mom_roc_zscore
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.224 < -0.2
+  sharpe: -0.2243
+- signal: sig_hf_range_position
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.554 < -0.2
+  sharpe: -0.5544
+- signal: sig_hf_body_ratio
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.389 < -0.2
+  sharpe: -0.3894
+- signal: sig_mr_deviation_atr
+  reason: correlation_redundancy
+  detail: '|ρ|=0.997 (+0.997) with sig_trend_price_above_ma (kept: Sharpe=+0.732 vs +0.719)'
+  sharpe: 0.719
+- signal: sig_mom_rsi_trend
+  reason: correlation_redundancy
+  detail: '|ρ|=0.980 (+0.980) with sig_trend_price_above_ma (kept: Sharpe=+0.732 vs +0.118)'
+  sharpe: 0.1184
+- signal: sig_trend_ema_cross
+  reason: correlation_redundancy
+  detail: '|ρ|=0.977 (+0.977) with sig_trend_slope_21 (kept: Sharpe=+0.366 vs +0.354)'
+  sharpe: 0.3544

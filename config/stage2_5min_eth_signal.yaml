@@ -1,0 +1,43 @@
+# Stage 2 — 5min ETH signal-layered PPO (trend-following).
+# 范式与 BTC 4h 对齐；regime gate 改用 1h SMA50（overlay 层，不在此 yaml）。
+# Usage: uv run python train.py --config config/stage2_5min_eth_signal.yaml --paradigm signal_layered
+paradigm: signal_layered
+
+training:
+  algo: ppo
+  policy: MlpPolicy
+  total_timesteps: 8_000_000   # 数据量 35× 4h，总步数相应拉长
+  n_envs: 8
+  backend: sb3
+  algo_kwargs:
+    learning_rate: 1.0e-4      # 降低学习率，抵抗高频噪音震荡
+    gamma: 0.995
+    n_steps: 2048              # 约 1 周 rollout 窗口
+    batch_size: 512
+    n_epochs: 10
+    gae_lambda: 0.95
+    clip_range: 0.15
+    ent_coef: 0.08             # 强熵正则，避免过早 policy 坍缩
+  action_masking: false
+
+env:
+  window_size: 192             # 5min × 192 = 16 小时视野
+  initial_balance: 10000.0
+  commission: 0.0005           # Binance taker 费率
+  risk_aversion_coef: 0.5
+  excess_return_coef: 0.5
+  stop_atr_mult: 2.5
+  stop_cooldown_steps: 72      # 6 小时冷却
+  random_start: true
+
+signals:
+  config_path: config/signals_v1_5min_eth.yaml   # 由 signal_elimination.py 生成
+
+crypto:
+  symbol: "ETH/USDT"
+  timeframe: "5min"
+  start_date: "2021-01-01 00:00:00"
+  end_date:   "2026-04-13 00:00:00"
+  timezone: "Asia/Shanghai"
+  db_table: "public.crypto_kline_binance"
+  train_ratio: 0.80
