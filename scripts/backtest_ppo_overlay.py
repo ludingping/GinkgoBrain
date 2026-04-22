@@ -111,7 +111,10 @@ def main() -> int:
     p.add_argument("--vol-target", type=float, default=0.0)
     p.add_argument("--vol-window", type=int, default=168)
     p.add_argument("--regime-gate", action="store_true")
-    p.add_argument("--regime-ma-days", type=int, default=200)
+    p.add_argument("--regime-ma-days", type=int, default=200,
+                   help="SMA window (bars of --regime-resample) for regime gate")
+    p.add_argument("--regime-resample", default="1D",
+                   help="Resample rule for regime gate timeframe (e.g. '1D', '1h', '15min')")
     p.add_argument("--rebalance-threshold", type=float, default=0.01)
     p.add_argument("--commission", type=float, default=0.001)
     args = p.parse_args()
@@ -124,7 +127,8 @@ def main() -> int:
     print(f"Loaded {len(signal_cols)} signals")
 
     bt_df = load_data(cfg, args.test_start, args.test_end,
-                      vol_window=args.vol_window, regime_ma_days=args.regime_ma_days)
+                      vol_window=args.vol_window, regime_ma_days=args.regime_ma_days,
+                      regime_resample=args.regime_resample)
 
     _ALLOWED = {"window_size", "initial_balance", "commission",
                 "risk_aversion_coef", "excess_return_coef",

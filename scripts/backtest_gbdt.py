@@ -55,9 +55,16 @@ _BARS_PER_YEAR = {
 # ─────────────────────────────────────────── risk overlays
 
 def add_risk_overlay(df: pd.DataFrame, timeframe: str,
-                     vol_window: int, regime_ma_days: int) -> pd.DataFrame:
+                     vol_window: int, regime_ma_days: int,
+                     regime_resample: str = "1D") -> pd.DataFrame:
     """Append realized_vol_ann and regime_ok columns; computed on full df so
-    slicing downstream inherits warmed-up values."""
+    slicing downstream inherits warmed-up values.
+
+    regime_resample: pandas resample rule for the gate timeframe (e.g. "1D", "1h",
+      "15min"). When != "1D", regime_ma_days is interpreted as "bars of that
+      resample" rather than calendar days. Default "1D" preserves the original
+      BTC 4h / 1h daily-SMA200 behavior byte-for-byte.
+    """
     df = df.copy()
     bars_per_year = _BARS_PER_YEAR.get(timeframe, 24 * 365)
 
@@ -66,11 +73,11 @@ def add_risk_overlay(df: pd.DataFrame, timeframe: str,
         log_ret.rolling(vol_window).std() * np.sqrt(bars_per_year)
     ).bfill().fillna(0.6)
 
-    daily_close = df.set_index("timestamp")["close"].resample("1D").last().dropna()
-    sma = daily_close.rolling(regime_ma_days).mean()
-    regime_ok_daily = (daily_close > sma).astype(int)
+    gate_close = df.set_index("timestamp")["close"].resample(regime_resample).last().dropna()
+    sma = gate_close.rolling(regime_ma_days).mean()
+    regime_ok_gate = (gate_close > sma).astype(int)
     df["regime_ok"] = (
-        regime_ok_daily.reindex(pd.DatetimeIndex(df["timestamp"]), method="ffill")
+        regime_ok_gate.reindex(pd.DatetimeIndex(df["timestamp"]), method="ffill")
         .fillna(0).astype(int).values
     )
     return df
@@ -79,7 +86,8 @@ def add_risk_overlay(df: pd.DataFrame, timeframe: str,
 # ─────────────────────────────────────────── data
 
 def load_data(cfg: dict, test_start: str | None, test_end: str | None = None,
-              vol_window: int = 168, regime_ma_days: int = 200) -> pd.DataFrame:
+              vol_window: int = 168, regime_ma_days: int = 200,
+              regime_resample: str = "1D") -> pd.DataFrame:
     c = cfg["crypto"]
     tz = c.get("timezone", "Asia/Shanghai")
     start_utc = pd.Timestamp(c["start_date"], tz=tz).tz_convert("UTC").isoformat()
@@ -99,7 +107,7 @@ def load_data(cfg: dict, test_start: str | None, test_end: str | None = None,
     df_tf = resample_ohlcv(df_raw, timeframe)
     df = add_indicators(df_tf)
     df = add_signals(df)
-    df = add_risk_overlay(df, timeframe, vol_window, regime_ma_days)
+    df = add_risk_overlay(df, timeframe, vol_window, regime_ma_days, regime_resample)
 
     tz_ = c.get("timezone", "Asia/Shanghai")
     if test_start:
@@ -458,7 +466,9 @@ def main() -> int:
     parser.add_argument("--regime-gate", action="store_true",
                         help="Force position to 0 when close < daily SMA")
     parser.add_argument("--regime-ma-days", type=int, default=200,
-                        help="Daily SMA window for regime gate")
+                        help="SMA window (bars of --regime-resample) for regime gate")
+    parser.add_argument("--regime-resample", default="1D",
+                        help="Resample rule for regime gate timeframe (e.g. '1D', '1h', '15min')")
     parser.add_argument("--rebalance-threshold", type=float, default=0.01,
                         help="Deadband: skip rebalance when |target - current| < this")
     parser.add_argument("--run-name", default=None)
@@ -481,7 +491,8 @@ def main() -> int:
 
     # Load data
     bt_df = load_data(cfg, args.test_start, args.test_end,
-                      vol_window=args.vol_window, regime_ma_days=args.regime_ma_days)
+                      vol_window=args.vol_window, regime_ma_days=args.regime_ma_days,
+                      regime_resample=args.regime_resample)
     missing = [s for s in signal_cols if s not in bt_df.columns]
     if missing:
         print(f"ERROR: missing signal columns: {missing}", file=sys.stderr)
