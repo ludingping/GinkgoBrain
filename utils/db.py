@@ -284,3 +284,112 @@ def read_liquidation_agg(
     agg["liq_total_usd"] = agg["liq_long_usd"] + agg["liq_short_usd"]
     agg = agg.reset_index().rename(columns={"liquidation_time": "timestamp"})
     return agg[cols]
+
+
+# =============================================================================
+# A 股 cnstock 数据读取（K 线 5m / day）
+#
+# Schema 在 ginkgo_bole.public：
+#   cnstock_kline_5m / cnstock_kline_day:
+#     trade_time (timestamptz UTC), stock_code (text)
+#     open_price, high_price, low_price, close_price (numeric)
+#     volume (bigint), amount (numeric)
+#     pre_close (numeric, 注意：可能是上一根 K 线 close，不是日线昨收)
+#     suspension (smallint, 0=正常 / 1=停牌)
+#
+# 警告：5m 数据是【未复权】原始价格；day 数据已前复权。
+#       使用 5m 时必须从 day 反推复权因子 adj_factor，再乘到 5m OHLC 上，
+#       否则除权日会出现极端跳空，触发错误信号。具体处理见
+#       docs/GinkgoBrain/300866-5min-T0反转-设计.md §3.2 v0.3。
+# =============================================================================
+
+def read_cnstock_kline_5m(
+    code: str,
+    start: str | None = None,
+    end: str | None = None,
+    only_unsuspended: bool = False,
+    table: str = "public.cnstock_kline_5m",
+) -> pd.DataFrame:
+    """
+    Load 5min cnstock K-line from ``cnstock_kline_5m``.
+
+    ⚠️ Returns RAW (unadjusted) prices. For backtest spanning ex-dividend
+    events, you MUST apply forward-adjustment using ``cnstock_kline_day``
+    (which is already forward-adjusted) — see design doc §3.2.
+
+    Args:
+        code:              A-share stock code, e.g. "300866" (no exchange suffix)
+        start:             inclusive lower bound (ISO date / datetime)
+        end:               exclusive upper bound (ISO)
+        only_unsuspended:  if True, filter out ``suspension=1`` rows
+        table:             fully-qualified table name
+
+    Returns:
+        DataFrame columns: ``trade_time, open_price, high_price, low_price,
+        close_price, volume, amount, pre_close, suspension``，按 trade_time 升序。
+    """
+    where = ["stock_code = :code"]
+    params: dict = {"code": code}
+    if start:
+        where.append("trade_time >= :start")
+        params["start"] = start
+    if end:
+        where.append("trade_time < :end")
+        params["end"] = end
+    if only_unsuspended:
+        where.append("suspension = 0")
+
+    query = (
+        f"SELECT trade_time, open_price, high_price, low_price, close_price, "
+        f"       volume, amount, pre_close, suspension "
+        f"FROM {table} "
+        f"WHERE {' AND '.join(where)} "
+        f"ORDER BY trade_time ASC"
+    )
+
+    with get_contract_engine().connect() as conn:
+        df = pd.read_sql(text(query), conn, params=params, parse_dates=["trade_time"])
+    return df.reset_index(drop=True)
+
+
+def read_cnstock_kline_day(
+    code: str,
+    start: str | None = None,
+    end: str | None = None,
+    table: str = "public.cnstock_kline_day",
+) -> pd.DataFrame:
+    """
+    Load daily cnstock K-line from ``cnstock_kline_day``（已前复权）.
+
+    Used as anchor to back-derive per-day forward-adjustment factor for 5m data.
+
+    Args:
+        code:  A-share stock code, e.g. "300866"
+        start: inclusive lower bound
+        end:   exclusive upper bound
+        table: fully-qualified table name
+
+    Returns:
+        DataFrame columns: ``trade_time, open_price, high_price, low_price,
+        close_price, volume, amount, pre_close, suspension``，按 trade_time 升序。
+    """
+    where = ["stock_code = :code"]
+    params: dict = {"code": code}
+    if start:
+        where.append("trade_time >= :start")
+        params["start"] = start
+    if end:
+        where.append("trade_time < :end")
+        params["end"] = end
+
+    query = (
+        f"SELECT trade_time, open_price, high_price, low_price, close_price, "
+        f"       volume, amount, pre_close, suspension "
+        f"FROM {table} "
+        f"WHERE {' AND '.join(where)} "
+        f"ORDER BY trade_time ASC"
+    )
+
+    with get_contract_engine().connect() as conn:
+        df = pd.read_sql(text(query), conn, params=params, parse_dates=["trade_time"])
+    return df.reset_index(drop=True)
