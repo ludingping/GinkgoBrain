@@ -4,8 +4,14 @@ import yaml
 import pandas as pd
 
 from utils import load_stock_data, load_crypto_data, add_indicators, add_multi_timeframe_indicators
-from utils.db import read_ohlcv
-from utils.signals import add_signals
+from utils.data_loader import merge_contract_data
+from utils.db import (
+    read_funding,
+    read_liquidation_agg,
+    read_ohlcv,
+    read_open_interest,
+)
+from utils.signals import add_contract_signals, add_signals
 from agents.ppo_shared import resample_ohlcv
 from envs import StockTradingEnv, CryptoTradingEnv, SignalLayeredEnv, load_signal_list
 from agents import Trainer, RLlibTrainer
@@ -167,8 +173,14 @@ def main():
     trainer.save()
 
 
-def _load_crypto_df(c: dict) -> pd.DataFrame:
-    """Shared crypto DB → DataFrame loader used by both paradigms."""
+def _load_crypto_df(c: dict, *, with_contracts: bool = False) -> pd.DataFrame:
+    """Shared crypto DB → DataFrame loader used by both paradigms.
+
+    Args:
+        with_contracts: True 时跨库 join funding/OI/liquidation 到 OHLCV 并立即
+            对合约列 fillna(0) —— 避免下游 add_indicators.dropna() 误删合约起点
+            前的 OHLCV 行（与 signal_linear_baseline.load_df_from_config 对称）。
+    """
     start_date = c.get("start_date", "2018-01-01 00:00:00")
     end_date = c.get("end_date", "2026-04-13 00:00:00")
     tz = c.get("timezone", "Asia/Shanghai")
@@ -190,9 +202,39 @@ def _load_crypto_df(c: dict) -> pd.DataFrame:
     df_raw["timestamp"] = ts.dt.tz_convert(tz)
 
     tf_resample = c.get("timeframe", "1d").lower()
-    if tf_resample == "1m":
-        return df_raw
-    return resample_ohlcv(df_raw, tf_resample)
+    df_tf = df_raw if tf_resample == "1m" else resample_ohlcv(df_raw, tf_resample)
+
+    if with_contracts:
+        # ccxt 现货格式（合约表存储约定）；BTCUSDT → BTC/USDT
+        ccxt_symbol = c["symbol"]
+        if "/" not in ccxt_symbol and ccxt_symbol.endswith("USDT"):
+            ccxt_symbol = f"{ccxt_symbol[:-4]}/USDT"
+
+        print(f"Loading contract metadata for {ccxt_symbol}...")
+        df_funding = read_funding(ccxt_symbol, start=start_utc, end=end_utc)
+        df_oi      = read_open_interest(ccxt_symbol, start=start_utc, end=end_utc)
+        df_liq     = read_liquidation_agg(ccxt_symbol, start=start_utc, end=end_utc)
+        for sub in (df_funding, df_oi, df_liq):
+            if sub.empty:
+                continue
+            sub_ts = sub["timestamp"]
+            if sub_ts.dt.tz is None:
+                sub_ts = sub_ts.dt.tz_localize("UTC")
+            sub["timestamp"] = sub_ts.dt.tz_convert(tz)
+
+        df_tf = merge_contract_data(
+            df_tf, df_funding=df_funding, df_oi=df_oi, df_liq=df_liq,
+        )
+        for col in (
+            "funding_rate", "sum_open_interest", "sum_open_interest_value",
+            "liq_long_usd", "liq_short_usd", "liq_total_usd",
+        ):
+            if col in df_tf.columns:
+                df_tf[col] = df_tf[col].fillna(0.0)
+        if "funding_origin" in df_tf.columns:
+            df_tf["funding_origin"] = df_tf["funding_origin"].fillna("")
+
+    return df_tf
 
 
 def _train_signal_layered(cfg, train_cfg, env_cfg, backend, args) -> None:
@@ -211,10 +253,20 @@ def _train_signal_layered(cfg, train_cfg, env_cfg, backend, args) -> None:
     signal_cols = load_signal_list(signals_path)
     print(f"Loaded {len(signal_cols)} signals from {signals_path}")
 
+    # 自动检测候选池是否含合约信号 → 决定是否跨库读 funding/OI/liquidation。
+    # 任何 sig_funding_* / sig_oi_* / sig_liq_* 出现即触发；与 signal_linear_baseline
+    # 的 --with-contracts 等价但无需 CLI 标志，由 yaml 信号列表驱动。
+    needs_contracts = any(
+        s.startswith(("sig_funding_", "sig_oi_", "sig_liq_")) for s in signal_cols
+    )
+    if needs_contracts:
+        print("[train] candidate pool contains contract signals → enabling cross-db merge")
+
     c = cfg["crypto"]
-    df_tf = _load_crypto_df(c)
+    df_tf = _load_crypto_df(c, with_contracts=needs_contracts)
     df = add_indicators(df_tf)
     df = add_signals(df)
+    df = add_contract_signals(df)
 
     missing = [s for s in signal_cols if s not in df.columns]
     if missing:
@@ -227,6 +279,7 @@ def _train_signal_layered(cfg, train_cfg, env_cfg, backend, args) -> None:
     _ALLOWED_ENV_KEYS = {
         "window_size", "initial_balance", "commission",
         "risk_aversion_coef", "excess_return_coef",
+        "action_inertia_coef", "trade_penalty_coef",
         "stop_atr_mult", "stop_cooldown_steps",
         "random_start", "render_mode",
     }
@@ -281,10 +334,20 @@ def _train_gbdt(cfg: dict, args) -> None:
     signal_cols = load_signal_list(signals_path)
     print(f"Loaded {len(signal_cols)} signals from {signals_path}")
 
+    # 自动检测候选池是否含合约信号 → 决定是否跨库读 funding/OI/liquidation。
+    # 任何 sig_funding_* / sig_oi_* / sig_liq_* 出现即触发；与 signal_linear_baseline
+    # 的 --with-contracts 等价但无需 CLI 标志，由 yaml 信号列表驱动。
+    needs_contracts = any(
+        s.startswith(("sig_funding_", "sig_oi_", "sig_liq_")) for s in signal_cols
+    )
+    if needs_contracts:
+        print("[train] candidate pool contains contract signals → enabling cross-db merge")
+
     c = cfg["crypto"]
-    df_tf = _load_crypto_df(c)
+    df_tf = _load_crypto_df(c, with_contracts=needs_contracts)
     df = add_indicators(df_tf)
     df = add_signals(df)
+    df = add_contract_signals(df)
 
     missing = [s for s in signal_cols if s not in df.columns]
     if missing:

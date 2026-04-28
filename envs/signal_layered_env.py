@@ -38,11 +38,13 @@ SAFETY_BUFFER = 10              # 留给 rolling rank / regime_drawdown
 STATE_DIM = 4                   # position_ratio, unrealized_pnl,
                                 # steps_since_stop, cumulative_log_return
 
-REWARD_KEYS = (                 # 与 §5.4.2 显式声明的 4 项一一对应
+REWARD_KEYS = (                 # 与 §5.4.2 显式声明的项 + trade-frequency 惩罚
     "log_return",
     "risk_aversion_adjustment",
     "excess_return",
     "trade_cost",
+    "action_inertia",
+    "trade_penalty",
 )
 
 
@@ -70,6 +72,8 @@ class SignalLayeredEnv(gym.Env):
         commission: float = 0.0005,
         risk_aversion_coef: float = 0.5,
         excess_return_coef: float = 0.5,
+        action_inertia_coef: float = 0.0,
+        trade_penalty_coef: float = 0.0,
         stop_atr_mult: float = 2.0,
         stop_cooldown_steps: int = 3,
         random_start: bool = False,
@@ -94,6 +98,8 @@ class SignalLayeredEnv(gym.Env):
         self.commission = float(commission)
         self.risk_aversion_coef = float(risk_aversion_coef)
         self.excess_return_coef = float(excess_return_coef)
+        self.action_inertia_coef = float(action_inertia_coef)
+        self.trade_penalty_coef = float(trade_penalty_coef)
         self.stop_atr_mult = float(stop_atr_mult)
         self.stop_cooldown_steps = int(stop_cooldown_steps)
         self.random_start = bool(random_start)
@@ -119,6 +125,7 @@ class SignalLayeredEnv(gym.Env):
     def _reset_state(self) -> None:
         self.balance: float = self.initial_balance
         self.position: float = 0.0
+        self._prev_action: int = 0
         self._entry_price: float | None = None
         self._steps_since_stop: int = self.window_size  # "long ago"
         self._cum_log_return: float = 0.0
@@ -204,17 +211,27 @@ class SignalLayeredEnv(gym.Env):
 
         trade_cost_term = -self._last_trade_cost
 
-        reward = log_return + risk_adj + excess + trade_cost_term
+        # ── 5b. Trade-frequency 惩罚（防 PPO 在 5min noise 上反复横跳）──
+        # action_inertia: 仓位档位变化幅度的连续惩罚（|target_ratio - prev_target_ratio|）
+        # trade_penalty: 任何 action 切换的固定惩罚（离散，每次切换固定扣分）
+        action_delta = abs(TARGET_POSITION[action] - TARGET_POSITION[self._prev_action])
+        inertia_term = -self.action_inertia_coef * action_delta
+        trade_pen_term = -self.trade_penalty_coef * (1.0 if action != self._prev_action else 0.0)
+
+        reward = log_return + risk_adj + excess + trade_cost_term + inertia_term + trade_pen_term
         self._last_reward_breakdown = {
             "log_return": log_return,
             "risk_aversion_adjustment": risk_adj,
             "excess_return": excess,
             "trade_cost": trade_cost_term,
+            "action_inertia": inertia_term,
+            "trade_penalty": trade_pen_term,
         }
         self.total_reward += reward
         self._cum_log_return += log_return
         if not self._last_stop_triggered:
             self._steps_since_stop = min(self._steps_since_stop + 1, self.window_size)
+        self._prev_action = action
 
         # ── 6. Roll state history forward ────────────────────────────────
         self._update_state_history(new_price)

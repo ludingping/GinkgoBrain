@@ -6,26 +6,28 @@ paradigm: signal_layered
 training:
   algo: ppo
   policy: MlpPolicy
-  total_timesteps: 8_000_000   # 数据量 35× 4h，总步数相应拉长
+  total_timesteps: 1_000_000   # SMOKE TEST：原 8M 在 70k step reward 单调劣化（-31→-37）；先 1M 验证调参方向
   n_envs: 8
   backend: sb3
   algo_kwargs:
-    learning_rate: 1.0e-4      # 降低学习率，抵抗高频噪音震荡
+    learning_rate: 3.0e-5      # 1e-4 太大让 policy 在错误方向滑；降到 3e-5 求稳
     gamma: 0.995
     n_steps: 2048              # 约 1 周 rollout 窗口
     batch_size: 512
     n_epochs: 10
     gae_lambda: 0.95
     clip_range: 0.15
-    ent_coef: 0.08             # 强熵正则，避免过早 policy 坍缩
+    ent_coef: 0.02             # 0.08 强探索 + 无 trade_penalty → 模型在 noise 上起飞；降到 0.02 让 policy 收敛
   action_masking: false
 
 env:
   window_size: 192             # 5min × 192 = 16 小时视野
   initial_balance: 10000.0
-  commission: 0.0005           # Binance taker 费率
+  commission: 0.002            # 0.0005 → 0.002 (×4)：5min PPO 学频繁横跳，加大 commission 让 trade_cost 显著（A 改造）
   risk_aversion_coef: 0.5
   excess_return_coef: 0.5
+  action_inertia_coef: 0.001   # 仓位档位变化幅度惩罚（A 改造：复活被 ignore 的设计稿参数）
+  trade_penalty_coef: 0.0005   # 每次 action 切换固定惩罚（A 改造）
   stop_atr_mult: 2.5
   stop_cooldown_steps: 72      # 6 小时冷却
   random_start: true

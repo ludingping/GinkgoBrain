@@ -1,0 +1,47 @@
+# Stage 4 — 1h ETH GBDT Sharpe-regression combiner（Plan F：PPO → GBDT 范式切换）。
+#
+# 背景（PPO walk-forward 失败的诊断）：
+#   - 5min ETH PPO walk-forward Sharpe -0.7~-1.77（噪声/信号比下学不到方向）
+#   - 1h ETH PPO 4M walk-forward (tr=0.50) Sharpe -0.54、return -32%、676 次切仓
+#   - PPO first-layer importance 显示模型偏好"波动率类（state-only）"信号，
+#     真正的趋势/合约信号 importance 中等且稳定性差
+#   - 信号集本身偏弱（最强 sig_trend_ema_cross Sharpe +0.40，远低于 BTC 4h 的 +0.7-0.9）
+#   - 设计稿 §6 指明：PPO 不行换 GBDT。GBDT 在小数据 + 弱信号场景比 PPO 鲁棒
+#
+# Phase 1：现有 17 信号集（含合约 + mtf）下，GBDT 是否能过 walk-forward？
+#   - 若过 → 直接接 paper trading（不必做 B2 信号扩展）
+#   - 若不过 → Phase 2：加 ETH/BTC ratio 等 ETH-specific 信号再试
+#
+# 与 stage4_1h_gbdt.yaml（BTC）唯一差异：symbol + signals_config + train_ratio
+#
+# Usage:
+#   uv run python train.py --config config/stage4_1h_eth_gbdt.yaml --combiner gbdt
+#   uv run python scripts/backtest_gbdt.py --model models/saved/ETHUSDT_signal_layered_1h_gbdt/... --config config/stage4_1h_eth_gbdt.yaml
+paradigm: signal_layered
+
+signals:
+  config_path: config/signals_v1_1h_eth.yaml   # 17 信号（含 4 合约 + 修后 mtf_1d_regime）
+
+gbdt:
+  horizon: 24             # 未来 24 根 1h ≈ 1 天风险调整收益
+  vol_floor: 1.0e-4
+  clip_range: [-5.0, 5.0]
+  thresholds: [1.0, 0.5, 0.0, -0.5]
+  train_ratio: 0.8        # GBDT 内部 train/val 切；与 crypto.train_ratio 解耦
+  early_stopping_rounds: 30
+  lgb_params:
+    n_estimators: 500
+    max_depth: 6
+    learning_rate: 0.05
+    min_child_samples: 20
+    reg_alpha: 0.1
+    reg_lambda: 0.1
+
+crypto:
+  symbol: "ETH/USDT"
+  timeframe: "1h"
+  start_date: "2022-01-01 00:00:00"
+  end_date:   "2026-04-13 00:00:00"
+  timezone: "Asia/Shanghai"
+  db_table: "public.crypto_kline_binance"
+  train_ratio: 0.50              # walk-forward：与 PPO 1h ETH 4M run 相同切点，可直接对比

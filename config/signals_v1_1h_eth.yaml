@@ -1,0 +1,72 @@
+version: 1
+generated_at: '2026-04-27T20:42:24'
+source:
+  tag: config:stage2_1h_eth_signal.yaml (tf=1h)
+  warmup_window: 100
+  periods_per_year: 8760
+thresholds:
+  sharpe_min: -0.2
+  pearson_abs_max: 0.95
+signals:
+- sig_trend_ema_cross
+- sig_trend_macd_hist
+- sig_mom_rsi_trend
+- sig_mom_stoch_state
+- sig_mom_roc_zscore
+- sig_vol_atr_pct
+- sig_vol_bb_width
+- sig_vol_bb_position
+- sig_regime_drawdown
+- sig_regime_return_60
+- sig_mtf_4h_trend
+- sig_mtf_1d_regime
+- sig_hf_body_ratio
+- sig_hf_vol_zscore_24
+- sig_oi_change_zscore
+- sig_liq_long_zscore
+- sig_liq_short_zscore
+eliminated:
+- signal: sig_mom_rsi_zone
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.275 < -0.2
+  sharpe: -0.2753
+- signal: sig_volume_obv_slope
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.979 < -0.2
+  sharpe: -0.9789
+- signal: sig_hf_range_position
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.614 < -0.2
+  sharpe: -0.6137
+- signal: sig_mr_rsi_extreme
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.270 < -0.2
+  sharpe: -0.2697
+- signal: sig_funding_current
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.525 < -0.2
+  sharpe: -0.5251
+- signal: sig_funding_trend
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.283 < -0.2
+  sharpe: -0.283
+- signal: sig_liq_imbalance
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.279 < -0.2
+  sharpe: -0.2795
+- signal: sig_mr_deviation_atr
+  reason: correlation_redundancy
+  detail: '|ρ|=0.997 (+0.997) with sig_trend_price_above_ma (kept: Sharpe=+0.024 vs -0.091)'
+  sharpe: -0.0912
+- signal: sig_trend_price_above_ma
+  reason: correlation_redundancy
+  detail: '|ρ|=0.983 (+0.983) with sig_mom_rsi_trend (kept: Sharpe=+0.227 vs +0.024)'
+  sharpe: 0.0239
+- signal: sig_trend_slope_21
+  reason: correlation_redundancy
+  detail: '|ρ|=0.978 (+0.978) with sig_trend_ema_cross (kept: Sharpe=+0.400 vs +0.217)'
+  sharpe: 0.217
+- signal: sig_volume_ratio
+  reason: correlation_redundancy
+  detail: '|ρ|=0.958 (+0.958) with sig_hf_vol_zscore_24 (kept: Sharpe=-0.015 vs -0.057)'
+  sharpe: -0.0571

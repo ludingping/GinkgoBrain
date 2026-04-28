@@ -9,25 +9,42 @@ from sqlalchemy.engine import Engine
 load_dotenv()
 
 
-def _build_url() -> str:
+def _build_url(db_name: str | None = None) -> str:
     host = os.environ["DB_HOST"]
     port = os.environ.get("DB_PORT", "5432")
-    name = os.environ["DB_NAME"]
+    name = db_name or os.environ["DB_NAME"]
     user = os.environ["DB_USER"]
     password = os.environ["DB_PASSWORD"]
     return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{name}"
 
 
-@lru_cache(maxsize=1)
-def get_engine() -> Engine:
-    """Return a cached SQLAlchemy engine built from .env variables."""
+def _build_engine(db_name: str | None = None) -> Engine:
     return create_engine(
-        _build_url(),
+        _build_url(db_name),
         pool_size=int(os.environ.get("DB_POOL_SIZE", 5)),
         max_overflow=int(os.environ.get("DB_MAX_OVERFLOW", 10)),
         pool_timeout=int(os.environ.get("DB_POOL_TIMEOUT", 30)),
         pool_pre_ping=True,
     )
+
+
+@lru_cache(maxsize=1)
+def get_engine() -> Engine:
+    """K 线 / 默认 DB engine（DB_NAME 环境变量；本地开发常为 quant_db）。"""
+    return _build_engine()
+
+
+@lru_cache(maxsize=1)
+def get_contract_engine() -> Engine:
+    """合约数据 DB engine（funding / OI / liquidation）。
+
+    本地开发：DB_NAME=quant_db (K线), CONTRACT_DB_NAME=ginkgo_bole (合约)
+    云端部署：DB_NAME=ginkgo_bole；不设 CONTRACT_DB_NAME → 复用 get_engine()
+    """
+    contract_db = os.environ.get("CONTRACT_DB_NAME")
+    if not contract_db or contract_db == os.environ.get("DB_NAME"):
+        return get_engine()
+    return _build_engine(contract_db)
 
 
 def read_ohlcv(
@@ -139,7 +156,7 @@ def read_funding(
         f"ORDER BY funding_time ASC"
     )
 
-    with get_engine().connect() as conn:
+    with get_contract_engine().connect() as conn:
         df = pd.read_sql(text(query), conn, params=params, parse_dates=["timestamp"])
 
     if df.empty:
@@ -186,7 +203,7 @@ def read_open_interest(
         f"ORDER BY bucket_time ASC"
     )
 
-    with get_engine().connect() as conn:
+    with get_contract_engine().connect() as conn:
         df = pd.read_sql(text(query), conn, params=params, parse_dates=["timestamp"])
     return df.reset_index(drop=True)
 
@@ -235,7 +252,7 @@ def read_liquidation_agg(
         f"ORDER BY liquidation_time ASC"
     )
 
-    with get_engine().connect() as conn:
+    with get_contract_engine().connect() as conn:
         raw = pd.read_sql(
             text(query), conn, params=params,
             parse_dates=["liquidation_time"],

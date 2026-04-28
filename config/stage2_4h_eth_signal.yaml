@@ -1,0 +1,56 @@
+# Stage 2 — 4h ETH signal-layered PPO（按 BTC 4h 方向尝试 ETH 4h）。
+#
+# 与 stage2_4h_signal.yaml（BTC 4h，已 demo 成功）唯一差异：
+#   - symbol: BTC/USDT → ETH/USDT
+#   - start_date: 2020-01-01 → 2022-01-01（quant_db ETH 数据起点）
+#   - signals.config_path: signals_v1.yaml → signals_v1_4h_eth.yaml（22 信号，4h ETH elimination 产物）
+#   - train_ratio: 0.75 → 0.50（walk-forward，与 1h ETH 同切点便于跨 timeframe 对比）
+#
+# 背景：
+#   - 5min/1h ETH PPO + GBDT 都 walk-forward 失败
+#   - 4h ETH GBDT R² -0.017 (early stop tree 1)
+#   - 但 PPO 是 sequential decision，可能学到 GBDT 看不到的 pattern
+#   - 4h 同 BTC 已成功 timeframe，是 ETH 范式可行性的最后一搏
+#
+# Usage:
+#   uv run python train.py --config config/stage2_4h_eth_signal.yaml --paradigm signal_layered
+paradigm: signal_layered
+
+training:
+  algo: ppo
+  policy: MlpPolicy
+  total_timesteps: 1_000_000
+  n_envs: 8
+  backend: sb3
+  algo_kwargs:
+    learning_rate: 1.5e-4
+    gamma: 0.995
+    n_steps: 1024
+    batch_size: 512
+    n_epochs: 10
+    gae_lambda: 0.95
+    clip_range: 0.2
+    ent_coef: 0.05
+  action_masking: false
+
+env:
+  window_size: 24         # 4h × 24 = 4 天视野（与 BTC 4h 同）
+  initial_balance: 10000.0
+  commission: 0.0005
+  risk_aversion_coef: 0.5
+  excess_return_coef: 0.5
+  stop_atr_mult: 2.0
+  stop_cooldown_steps: 3
+  random_start: true
+
+signals:
+  config_path: config/signals_v1_4h_eth.yaml   # 22 信号（4h ETH elimination 产物）
+
+crypto:
+  symbol: "ETH/USDT"
+  timeframe: "4h"
+  start_date: "2022-01-01 00:00:00"
+  end_date:   "2026-04-13 00:00:00"
+  timezone: "Asia/Shanghai"
+  db_table: "public.crypto_kline_binance"
+  train_ratio: 0.50              # walk-forward 同 1h，便于跨 tf 对比

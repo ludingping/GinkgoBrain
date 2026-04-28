@@ -61,9 +61,19 @@ from sklearn.model_selection import TimeSeriesSplit  # noqa: E402
 from sklearn.preprocessing import StandardScaler  # noqa: E402
 
 from agents.ppo_shared import resample_ohlcv  # noqa: E402
-from utils.db import read_ohlcv  # noqa: E402
+from utils.data_loader import merge_contract_data  # noqa: E402
+from utils.db import (  # noqa: E402
+    read_funding,
+    read_liquidation_agg,
+    read_ohlcv,
+    read_open_interest,
+)
 from utils.indicators import add_indicators  # noqa: E402
-from utils.signals import SIGNAL_WARMUP_WINDOW, add_signals  # noqa: E402
+from utils.signals import (  # noqa: E402
+    SIGNAL_WARMUP_WINDOW,
+    add_contract_signals,
+    add_signals,
+)
 
 
 DEFAULT_CACHE = (
@@ -86,11 +96,31 @@ def load_signal_list(path: Path) -> list[str]:
     return list(payload["signals"])
 
 
-def load_df_from_config(config_path: Path) -> tuple[pd.DataFrame, str]:
+def _to_ccxt_symbol(symbol: str) -> str:
+    """`BTCUSDT` → `BTC/USDT`（合约表用 ccxt 现货格式存）。已含 `/` 时原样返回。"""
+    if "/" in symbol:
+        return symbol
+    if symbol.endswith("USDT"):
+        return f"{symbol[:-4]}/USDT"
+    return symbol
+
+
+def load_df_from_config(
+    config_path: Path,
+    *,
+    with_contracts: bool = False,
+) -> tuple[pd.DataFrame, str]:
     """Load + resample crypto OHLCV from DB per a training-style config yaml.
 
     Mirrors train.py::_load_crypto_df so baseline uses the same data path as
     training. Returns (df_tf, timeframe_lower).
+
+    Args:
+        with_contracts: 若 True，额外读 `funding_rate` / `sum_open_interest` /
+            `liq_long_usd / liq_short_usd / liq_total_usd` 跨库 join 到 OHLCV。
+            合约信号 sig_funding_* / sig_oi_* / sig_liq_* 在 build_dataset_from_df
+            中由 `add_contract_signals` 派生；缺列时自动 0 占位。
+            默认 False —— BTC 4h 调用路径完全不变。
     """
     with config_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -111,6 +141,41 @@ def load_df_from_config(config_path: Path) -> tuple[pd.DataFrame, str]:
 
     tf = c.get("timeframe", "1d").lower()
     df_tf = df_raw if tf == "1m" else resample_ohlcv(df_raw, tf)
+
+    if with_contracts:
+        ccxt_symbol = _to_ccxt_symbol(c["symbol"])
+        # 同一区间从 ginkgo_bole 拉合约元数据；timezone-naive timestamps 输入即可
+        df_funding = read_funding(ccxt_symbol, start=start_utc, end=end_utc)
+        df_oi      = read_open_interest(ccxt_symbol, start=start_utc, end=end_utc)
+        df_liq     = read_liquidation_agg(ccxt_symbol, start=start_utc, end=end_utc)
+        # 合约表 timestamp 归一到 config tz：
+        #   - PG TIMESTAMPTZ → pandas 解析后通常带 UTC tz，需要 tz_convert
+        #   - tz-naive（极少见，例如测试用 SQLite）则先 localize UTC 再 convert
+        for sub in (df_funding, df_oi, df_liq):
+            if sub.empty:
+                continue
+            ts = sub["timestamp"]
+            if ts.dt.tz is None:
+                ts = ts.dt.tz_localize("UTC")
+            sub["timestamp"] = ts.dt.tz_convert(tz)
+        df_tf = merge_contract_data(
+            df_tf, df_funding=df_funding, df_oi=df_oi, df_liq=df_liq,
+        )
+
+        # ⚠️ 关键：merge_asof(direction="backward") 在合约数据起点之前的所有 base 行
+        # 新列全是 NaN。下游 add_indicators 内部对整个 df 做 dropna()——会把这些
+        # 完全合法的 OHLCV 行一起删掉（数据从 55 万行掉到 ~359 行的根因）。
+        # 这里立刻用中性值填充，让 dropna 只过滤真实的 OHLCV/indicator warmup NaN。
+        _contract_num_cols = (
+            "funding_rate", "sum_open_interest", "sum_open_interest_value",
+            "liq_long_usd", "liq_short_usd", "liq_total_usd",
+        )
+        for col in _contract_num_cols:
+            if col in df_tf.columns:
+                df_tf[col] = df_tf[col].fillna(0.0)
+        if "funding_origin" in df_tf.columns:
+            df_tf["funding_origin"] = df_tf["funding_origin"].fillna("")
+
     return df_tf, tf
 
 
@@ -120,6 +185,9 @@ def build_dataset_from_df(
     """Return (X, y_cls, y_reg) aligned. Drops warmup + last `horizon` rows."""
     df_ind = add_indicators(df_raw)
     df = add_signals(df_ind)
+    # 合约信号：若 OHLCV 已 merge 了 funding_rate/sum_open_interest/liq_*_usd 列就生效；
+    # 否则 add_contract_signals 内部填 0（占位），无副作用，确保对齐 signal_cols 列名。
+    df = add_contract_signals(df)
     df = df.iloc[SIGNAL_WARMUP_WINDOW:].reset_index(drop=True)
 
     missing = [c for c in signal_cols if c not in df.columns]
@@ -344,6 +412,10 @@ def main() -> int:
     parser.add_argument("--r2-floor", type=float, default=-0.10,
                         help="R² mean must exceed this (catastrophe check, not a positive-predictive gate)")
     parser.add_argument("--report-dir", type=Path, default=DEFAULT_REPORT_DIR)
+    parser.add_argument("--with-contracts", action="store_true",
+                        help="跨库 join funding/OI/liquidation 到 OHLCV，让候选池含 "
+                             "sig_funding_*/sig_oi_*/sig_liq_* 6 个合约信号。"
+                             "需要 .env 设 CONTRACT_DB_NAME（或 DB_NAME 同库）。")
     args = parser.parse_args()
 
     if not args.signals_config.exists():
@@ -357,7 +429,7 @@ def main() -> int:
         if not args.config.exists():
             print(f"ERROR: config not found: {args.config}", file=sys.stderr)
             return 1
-        df_tf, tf = load_df_from_config(args.config)
+        df_tf, tf = load_df_from_config(args.config, with_contracts=args.with_contracts)
         if args.horizon is None:
             if tf not in _BARS_PER_DAY:
                 print(f"ERROR: unknown timeframe '{tf}', pass --horizon explicitly",

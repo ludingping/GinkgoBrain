@@ -130,8 +130,12 @@ def add_signals(df: pd.DataFrame) -> pd.DataFrame:
     df["sig_regime_return_60"] = znorm(close.pct_change(60))
 
     # ─── Multi-timeframe context (higher-TF signals broadcast to this TF) ──
-    # On 4h/1d data these will approximately duplicate the existing trend/regime
-    # signals; signal_elimination's correlation filter handles the dedup.
+    # ⚠️ 数据泄漏修复（见 GinkgoRoad/docs/GinkgoBrain/5min-ETH-趋势跟随-设计.md A）：
+    #   resample(closed="left", label="left").last() 会把 bucket 内**未来**的 close
+    #   通过 bucket 起始 label 反向流入；reindex(method="ffill") 把这个未来 close
+    #   喂到 bucket 起始时刻的 5min bar，构成数据泄漏（5min ETH baseline 上 sig_mtf
+    #   _4h_trend Sharpe 异常达 +2.605 即此 bug 的症状）。
+    #   修法：.shift(1) 让每个 bucket label 只能看到**上一个已闭合 bucket** 的指标。
     if "timestamp" in df.columns and len(df) > 100:
         idx = pd.DatetimeIndex(df["timestamp"])
         df_ts = df.set_index("timestamp")
@@ -139,12 +143,12 @@ def add_signals(df: pd.DataFrame) -> pd.DataFrame:
         ohlc_4h = df_ts["close"].resample("4h", closed="left", label="left").last().dropna()
         ema9_4h = ohlc_4h.ewm(span=9, adjust=False).mean()
         ema21_4h = ohlc_4h.ewm(span=21, adjust=False).mean()
-        trend_4h = np.sign(ema9_4h - ema21_4h)
+        trend_4h = np.sign(ema9_4h - ema21_4h).shift(1)  # 防泄漏：仅看上一已闭合 4h bucket
         df["sig_mtf_4h_trend"] = trend_4h.reindex(idx, method="ffill").fillna(0.0).values
 
         ohlc_1d = df_ts["close"].resample("1d", closed="left", label="left").last().dropna()
         ret_60_1d = ohlc_1d.pct_change(60)
-        regime_1d = znorm(ret_60_1d)
+        regime_1d = znorm(ret_60_1d).shift(1)  # 防泄漏：仅看上一已闭合 1d bucket
         df["sig_mtf_1d_regime"] = regime_1d.reindex(idx, method="ffill").fillna(0.0).values
     else:
         df["sig_mtf_4h_trend"] = 0.0

@@ -126,9 +126,16 @@ def main() -> int:
     signal_cols = load_signal_list(cfg["signals"]["config_path"])
     print(f"Loaded {len(signal_cols)} signals")
 
+    needs_contracts = any(
+        s.startswith(("sig_funding_", "sig_oi_", "sig_liq_")) for s in signal_cols
+    )
+    if needs_contracts:
+        print("[overlay] candidate pool contains contract signals → enabling cross-db merge")
+
     bt_df = load_data(cfg, args.test_start, args.test_end,
                       vol_window=args.vol_window, regime_ma_days=args.regime_ma_days,
-                      regime_resample=args.regime_resample)
+                      regime_resample=args.regime_resample,
+                      with_contracts=needs_contracts)
 
     _ALLOWED = {"window_size", "initial_balance", "commission",
                 "risk_aversion_coef", "excess_return_coef",

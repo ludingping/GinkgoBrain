@@ -1,0 +1,50 @@
+# Stage 4 — 4h ETH GBDT Sharpe-regression combiner（按 BTC 4h 方向尝试 ETH 4h）。
+#
+# 背景：
+#   - BTC 4h PPO + GBDT 范式已 demo 成功（设计稿 §1）
+#   - ETH 5min PPO walk-forward Sharpe -0.7 ~ -1.77（噪声太大）
+#   - ETH 1h PPO walk-forward Sharpe -0.54 / GBDT R² -0.02（信号集天花板）
+#   - ETH 1h ETH/BTC ratio stat check：Pearson < 0.017 不会 break-through
+#   - 4h 噪声/信号比比 1h 再小 ~2 倍，与 BTC 4h 同 timeframe，是范式可行性的最后一个 timeframe 验证
+#
+# Phase 1：现有 17 信号集在 4h 上 GBDT R² 是否过 0？
+#   - R² > 0.05 → 训练 + backtest，可能性高
+#   - R² 0~0.05 → 弱可行，看 backtest Sharpe
+#   - R² < 0 → 4h 也不行 → ETH 单独 alpha 真不存在 → 关闭这条线
+#
+# 与 stage4_1h_eth_gbdt.yaml 唯一差异：timeframe 1h→4h, horizon 24→6
+#
+# Usage:
+#   uv run python scripts/signal_elimination.py --config config/stage4_4h_eth_gbdt.yaml \
+#       --with-contracts \
+#       --output config/signals_v1_4h_eth.yaml \
+#       --log config/signal_elimination_log_4h_eth.md
+#   uv run python train.py --config config/stage4_4h_eth_gbdt.yaml --combiner gbdt
+paradigm: signal_layered
+
+signals:
+  config_path: config/signals_v1_4h_eth.yaml   # 由 elimination 生成
+
+gbdt:
+  horizon: 6              # 4h × 6 = 24h；与 BTC 4h 同语义（预测 1 天 Sharpe）
+  vol_floor: 1.0e-4
+  clip_range: [-5.0, 5.0]
+  thresholds: [1.0, 0.5, 0.0, -0.5]
+  train_ratio: 0.8
+  early_stopping_rounds: 30
+  lgb_params:
+    n_estimators: 500
+    max_depth: 6
+    learning_rate: 0.05
+    min_child_samples: 20
+    reg_alpha: 0.1
+    reg_lambda: 0.1
+
+crypto:
+  symbol: "ETH/USDT"
+  timeframe: "4h"
+  start_date: "2022-01-01 00:00:00"
+  end_date:   "2026-04-13 00:00:00"
+  timezone: "Asia/Shanghai"
+  db_table: "public.crypto_kline_binance"
+  train_ratio: 0.50              # walk-forward：与 PPO 1h 同切点便于对比

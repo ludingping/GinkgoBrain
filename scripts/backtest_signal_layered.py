@@ -36,15 +36,32 @@ from agents.ppo_shared import resample_ohlcv                          # noqa: E4
 from envs.signal_layered_env import (                                  # noqa: E402
     SignalLayeredEnv, TARGET_POSITION, load_signal_list,
 )
-from utils.db import read_ohlcv                                        # noqa: E402
+from utils.data_loader import merge_contract_data                      # noqa: E402
+from utils.db import (                                                  # noqa: E402
+    read_funding,
+    read_liquidation_agg,
+    read_ohlcv,
+    read_open_interest,
+)
 from utils.indicators import add_indicators                            # noqa: E402
-from utils.signals import add_signals                                  # noqa: E402
+from utils.signals import add_contract_signals, add_signals            # noqa: E402
 
 
 # ═══════════════════════════════════════════════════════════════════ data
 
-def load_data(cfg: dict, test_start: str | None, test_end: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Return (full_df_with_signals, backtest_df) based on config + optional date cut."""
+def load_data(
+    cfg: dict,
+    test_start: str | None,
+    test_end: str | None = None,
+    *,
+    with_contracts: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return (full_df_with_signals, backtest_df) based on config + optional date cut.
+
+    Args:
+        with_contracts: True 时跨库 join funding/OI/liquidation 到 OHLCV，与
+            train.py / signal_linear_baseline 的 with_contracts 镜像一致。
+    """
     c = cfg["crypto"]
     tz = c.get("timezone", "Asia/Shanghai")
     start_utc = pd.Timestamp(c["start_date"], tz=tz).tz_convert("UTC").isoformat()
@@ -60,8 +77,38 @@ def load_data(cfg: dict, test_start: str | None, test_end: str | None = None) ->
         ts = ts.dt.tz_localize("UTC")
     df_raw["timestamp"] = ts.dt.tz_convert(tz)
     df_tf = resample_ohlcv(df_raw, c.get("timeframe", "4h").lower())
+
+    if with_contracts:
+        ccxt_symbol = c["symbol"] if "/" in c["symbol"] else (
+            f"{c['symbol'][:-4]}/USDT" if c["symbol"].endswith("USDT") else c["symbol"]
+        )
+        print(f"Loading contract metadata for {ccxt_symbol}...")
+        df_funding = read_funding(ccxt_symbol, start=start_utc, end=end_utc)
+        df_oi      = read_open_interest(ccxt_symbol, start=start_utc, end=end_utc)
+        df_liq     = read_liquidation_agg(ccxt_symbol, start=start_utc, end=end_utc)
+        for sub in (df_funding, df_oi, df_liq):
+            if sub.empty:
+                continue
+            sub_ts = sub["timestamp"]
+            if sub_ts.dt.tz is None:
+                sub_ts = sub_ts.dt.tz_localize("UTC")
+            sub["timestamp"] = sub_ts.dt.tz_convert(tz)
+        df_tf = merge_contract_data(
+            df_tf, df_funding=df_funding, df_oi=df_oi, df_liq=df_liq,
+        )
+        # 防 add_indicators 全局 dropna 把合约起点前的 OHLCV 行误删
+        for col in (
+            "funding_rate", "sum_open_interest", "sum_open_interest_value",
+            "liq_long_usd", "liq_short_usd", "liq_total_usd",
+        ):
+            if col in df_tf.columns:
+                df_tf[col] = df_tf[col].fillna(0.0)
+        if "funding_origin" in df_tf.columns:
+            df_tf["funding_origin"] = df_tf["funding_origin"].fillna("")
+
     df = add_indicators(df_tf)
     df = add_signals(df)
+    df = add_contract_signals(df)
 
     if test_start:
         test_ts = pd.Timestamp(test_start, tz=tz)
@@ -416,7 +463,13 @@ def main() -> int:
     signal_cols = load_signal_list(cfg["signals"]["config_path"])
     print(f"Loaded {len(signal_cols)} signals")
 
-    _, bt_df = load_data(cfg, args.test_start, args.test_end)
+    needs_contracts = any(
+        s.startswith(("sig_funding_", "sig_oi_", "sig_liq_")) for s in signal_cols
+    )
+    if needs_contracts:
+        print("[backtest] candidate pool contains contract signals → enabling cross-db merge")
+
+    _, bt_df = load_data(cfg, args.test_start, args.test_end, with_contracts=needs_contracts)
 
     _ALLOWED = {"window_size", "initial_balance", "commission",
                 "risk_aversion_coef", "excess_return_coef",

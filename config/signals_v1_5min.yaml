@@ -1,5 +1,5 @@
 version: 1
-generated_at: '2026-04-26T11:30:33'
+generated_at: '2026-04-26T11:22:40'
 source:
   tag: config:stage2_5min_eth_signal.yaml (tf=5min)
   warmup_window: 100

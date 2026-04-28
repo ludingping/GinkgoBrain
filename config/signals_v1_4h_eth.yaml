@@ -1,0 +1,57 @@
+version: 1
+generated_at: '2026-04-28T10:04:13'
+source:
+  tag: config:stage4_4h_eth_gbdt.yaml (tf=4h)
+  warmup_window: 100
+  periods_per_year: 2190
+thresholds:
+  sharpe_min: -0.2
+  pearson_abs_max: 0.95
+signals:
+- sig_trend_macd_hist
+- sig_trend_price_above_ma
+- sig_trend_slope_21
+- sig_mom_rsi_trend
+- sig_mom_stoch_state
+- sig_mom_roc_zscore
+- sig_vol_atr_pct
+- sig_vol_bb_width
+- sig_vol_bb_position
+- sig_volume_ratio
+- sig_regime_drawdown
+- sig_regime_return_60
+- sig_mtf_4h_trend
+- sig_mtf_1d_regime
+- sig_hf_range_position
+- sig_hf_body_ratio
+- sig_hf_vol_zscore_24
+- sig_mr_deviation_atr
+- sig_funding_trend
+- sig_oi_change_zscore
+- sig_liq_long_zscore
+- sig_liq_short_zscore
+eliminated:
+- signal: sig_mom_rsi_zone
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.370 < -0.2
+  sharpe: -0.3695
+- signal: sig_volume_obv_slope
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.430 < -0.2
+  sharpe: -0.4303
+- signal: sig_mr_rsi_extreme
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.476 < -0.2
+  sharpe: -0.4761
+- signal: sig_funding_current
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.722 < -0.2
+  sharpe: -0.7216
+- signal: sig_liq_imbalance
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.277 < -0.2
+  sharpe: -0.2772
+- signal: sig_trend_ema_cross
+  reason: correlation_redundancy
+  detail: '|ρ|=0.977 (+0.977) with sig_trend_slope_21 (kept: Sharpe=+0.308 vs +0.123)'
+  sharpe: 0.1233

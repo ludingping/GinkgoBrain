@@ -1,6 +1,6 @@
 # Signal Elimination Log — TC-A7
 
-- Generated: `2026-04-26T11:30:33`  
+- Generated: `2026-04-26T11:22:40`  
 - Sharpe gate: `< -0.2`  
 - Correlation gate: `|ρ| > 0.95`  
 - State-only signals exempt from Sharpe gate: `['sig_regime_drawdown', 'sig_vol_atr_pct', 'sig_vol_bb_position', 'sig_vol_bb_width']`

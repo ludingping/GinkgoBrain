@@ -1,8 +1,8 @@
 # Linear Baseline Report — TC-A6
 
-- Generated: `2026-04-19T09:25:40`  
-- Signals config: `config/signals_v1.yaml` (11 features)  
-- Data source: `config:stage2_5min_signal.yaml (tf=5min)`  
+- Generated: `2026-04-26T11:33:25`  
+- Signals config: `config/signals_v1_5min_eth.yaml` (19 features)  
+- Data source: `config:stage2_5min_eth_signal.yaml (tf=5min)`  
 - Target horizon: **k = 288 bars**  
 - CV: TimeSeriesSplit(3 folds, no shuffle)  
 - Iron gate: AUC mean > **0.52** AND min > **0.5**  
@@ -12,16 +12,16 @@
 
 | Metric | Rule | Min | Mean | Max | Pass |
 |--------|------|-----|------|-----|------|
-| ROC-AUC (LogReg, iron gate) | mean > 0.52 AND min > 0.5 | 0.4897 | 0.5147 | 0.5416 | ❌ |
-| R² (LinReg, diagnostic) | mean > -0.1 | -0.0271 | -0.0045 | +0.0080 | ✅ |
+| ROC-AUC (LogReg, iron gate) | mean > 0.52 AND min > 0.5 | 0.4996 | 0.5146 | 0.5307 | ❌ |
+| R² (LinReg, diagnostic) | mean > -0.1 | -0.0278 | -0.0084 | +0.0026 | ✅ |
 
 ## Per-fold metrics
 
 | Fold | n_train | n_val | ROC-AUC | R² |
 |------|---------|-------|---------|-----|
-| 1 | 59,873 | 59,870 | 0.5416 | +0.0080 |
-| 2 | 119,743 | 59,870 | 0.5128 | +0.0058 |
-| 3 | 179,613 | 59,870 | 0.4897 | -0.0271 |
+| 1 | 138,632 | 138,631 | 0.4996 | -0.0278 |
+| 2 | 277,263 | 138,631 | 0.5307 | +0.0026 |
+| 3 | 415,894 | 138,631 | 0.5133 | -0.0001 |
 
 ## Diagnostics (last fold)
 

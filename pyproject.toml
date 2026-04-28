@@ -19,6 +19,8 @@ dependencies = [
     "pandas-ta>=0.3.14b0",
     # ML baselines (TC-A6 linear baseline, future GBDT combiner utilities)
     "scikit-learn>=1.4.0",
+    # Statistical tests (StatArb ADF cointegration test)
+    "statsmodels>=0.14.0",
     # Visualization
     "matplotlib>=3.8.0",
     "plotly>=5.20.0",

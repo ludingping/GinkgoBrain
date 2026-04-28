@@ -34,10 +34,17 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from agents.ppo_shared import resample_ohlcv  # noqa: E402
-from utils.db import read_ohlcv  # noqa: E402
+from utils.data_loader import merge_contract_data  # noqa: E402
+from utils.db import (  # noqa: E402
+    read_funding,
+    read_liquidation_agg,
+    read_ohlcv,
+    read_open_interest,
+)
 from utils.indicators import add_indicators  # noqa: E402
 from utils.signals import (  # noqa: E402
     SIGNAL_WARMUP_WINDOW,
+    add_contract_signals,
     add_signals,
     signal_columns,
 )
@@ -90,8 +97,27 @@ def compute_stats(
     return sharpe, corr
 
 
-def load_df_from_config(config_path: Path) -> tuple[pd.DataFrame, str]:
-    """Mirror signal_linear_baseline.load_df_from_config: DB → resampled df."""
+def _to_ccxt_symbol(symbol: str) -> str:
+    """`BTCUSDT` → `BTC/USDT`（合约表用 ccxt 现货格式存）。已含 `/` 时原样返回。"""
+    if "/" in symbol:
+        return symbol
+    if symbol.endswith("USDT"):
+        return f"{symbol[:-4]}/USDT"
+    return symbol
+
+
+def load_df_from_config(
+    config_path: Path,
+    *,
+    with_contracts: bool = False,
+) -> tuple[pd.DataFrame, str]:
+    """Mirror signal_linear_baseline.load_df_from_config: DB → resampled df.
+
+    Args:
+        with_contracts: True 时跨库 join funding/OI/liquidation 到 OHLCV，并立刻
+            对合约列 fillna(0)——避免下游 `add_indicators.dropna()` 误删合约起点
+            之前的 OHLCV 行（设计稿 §4.2 + 5min ETH 调试经验）。
+    """
     with config_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     c = cfg["crypto"]
@@ -109,6 +135,32 @@ def load_df_from_config(config_path: Path) -> tuple[pd.DataFrame, str]:
     df_raw["timestamp"] = ts.dt.tz_convert(tz)
     tf = c.get("timeframe", "1d").lower()
     df_tf = df_raw if tf == "1m" else resample_ohlcv(df_raw, tf)
+
+    if with_contracts:
+        ccxt_symbol = _to_ccxt_symbol(c["symbol"])
+        df_funding = read_funding(ccxt_symbol, start=start_utc, end=end_utc)
+        df_oi      = read_open_interest(ccxt_symbol, start=start_utc, end=end_utc)
+        df_liq     = read_liquidation_agg(ccxt_symbol, start=start_utc, end=end_utc)
+        for sub in (df_funding, df_oi, df_liq):
+            if sub.empty:
+                continue
+            sub_ts = sub["timestamp"]
+            if sub_ts.dt.tz is None:
+                sub_ts = sub_ts.dt.tz_localize("UTC")
+            sub["timestamp"] = sub_ts.dt.tz_convert(tz)
+        df_tf = merge_contract_data(
+            df_tf, df_funding=df_funding, df_oi=df_oi, df_liq=df_liq,
+        )
+        # 防 add_indicators 全局 dropna 把合约起点前的 OHLCV 行误删
+        for col in (
+            "funding_rate", "sum_open_interest", "sum_open_interest_value",
+            "liq_long_usd", "liq_short_usd", "liq_total_usd",
+        ):
+            if col in df_tf.columns:
+                df_tf[col] = df_tf[col].fillna(0.0)
+        if "funding_origin" in df_tf.columns:
+            df_tf["funding_origin"] = df_tf["funding_origin"].fillna("")
+
     return df_tf, tf
 
 
@@ -252,13 +304,16 @@ def main() -> int:
                         help="Output decision log. Default matches --output naming.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print decisions but do not write files")
+    parser.add_argument("--with-contracts", action="store_true",
+                        help="跨库 join funding/OI/liquidation 让候选池含合约信号"
+                             "（与 signal_linear_baseline.py 对称）")
     args = parser.parse_args()
 
     if args.config is not None:
         if not args.config.exists():
             print(f"ERROR: config not found: {args.config}", file=sys.stderr)
             return 1
-        df_tf, tf = load_df_from_config(args.config)
+        df_tf, tf = load_df_from_config(args.config, with_contracts=args.with_contracts)
         if tf not in BARS_PER_YEAR:
             print(f"ERROR: unknown timeframe '{tf}'", file=sys.stderr)
             return 1
@@ -267,6 +322,7 @@ def main() -> int:
         print(f"DB load: timeframe={tf}, bars={len(df_tf)}, bars/year={periods_per_year}")
         df_ind = add_indicators(df_tf)
         df = add_signals(df_ind)
+        df = add_contract_signals(df)
         output_path = args.output or REPO_ROOT / "config" / f"signals_v1_{tf}.yaml"
         log_path = args.log or REPO_ROOT / "config" / f"signal_elimination_log_{tf}.md"
     else:
@@ -279,6 +335,7 @@ def main() -> int:
         df_raw = pd.read_parquet(args.cache)
         df_ind = add_indicators(df_raw)
         df = add_signals(df_ind)
+        df = add_contract_signals(df)
         periods_per_year = PERIODS_PER_YEAR
         source_tag = f"cache:{args.cache.name}"
         output_path = args.output or REPO_ROOT / "config" / "signals_v1.yaml"
