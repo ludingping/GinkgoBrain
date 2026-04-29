@@ -118,10 +118,11 @@ def build_regime_columns(df_day: pd.DataFrame) -> pd.DataFrame:
 # ─── Signal trigger / scoring ───────────────────────────────────────────────
 
 
-def event_trigger_mask(regime_series: pd.Series, target: str) -> pd.Series:
-    """True on first day of entering target regime（事件去重，与 notebook §3.4 一致）。"""
-    is_target = (regime_series == target).fillna(False)
-    return is_target & ~is_target.shift(fill_value=False)
+def event_trigger_mask(regime_series: pd.Series, prev: str, to: str) -> pd.Series:
+    """v2 directional：True on day where regime transitions from `prev` to `to`."""
+    today_match = (regime_series == to).fillna(False)
+    yest_match  = (regime_series.shift(1) == prev).fillna(False)
+    return today_match & yest_match
 
 
 @dataclass
@@ -142,7 +143,9 @@ def score_signal(
 ) -> SignalScore:
     """单个信号在 period_mask 范围内的触发收益统计。"""
     regime_col = INDICATOR_TO_REGIME_COL[signal["indicator"]]
-    triggers = event_trigger_mask(df[regime_col], signal["regime"]) & period_mask
+    triggers = event_trigger_mask(
+        df[regime_col], signal["prev_regime"], signal["regime"]
+    ) & period_mask
 
     h = int(signal["h"])
     p = df["close_price"]
@@ -189,7 +192,7 @@ def simulate_portfolio(
 
     for col_idx, sig in enumerate(signals.itertuples(index=False)):
         regime_col = INDICATOR_TO_REGIME_COL[sig.indicator]
-        triggers   = event_trigger_mask(df[regime_col], sig.regime).to_numpy()
+        triggers   = event_trigger_mask(df[regime_col], sig.prev_regime, sig.regime).to_numpy()
 
         h = int(sig.h)
         sign = +1 if sig.direction == "long" else -1

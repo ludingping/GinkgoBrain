@@ -141,12 +141,6 @@ def build_regime_columns(df_day: pd.DataFrame) -> pd.DataFrame:
 # ─── Meta-label scoring ─────────────────────────────────────────────────────
 
 
-def first_day_of_regime(s: pd.Series) -> pd.Series:
-    """事件去重：每个连续 regime 段只保留首日。"""
-    so = s.astype("object")
-    return so.where((so != so.shift()) & so.notna(), other=np.nan)
-
-
 def regime_score(
     df: pd.DataFrame,
     regime_col: str,
@@ -155,14 +149,35 @@ def regime_score(
     indicator_name: str | None = None,
     entry_lag: int = 1,
 ) -> pd.DataFrame:
-    """无前视 T+1 entry，输出 (regime × h) 的 mean / Sharpe / t-stat 表。"""
+    """Directional regime transition scoring (v2).
+
+    事件 = (prev_regime, to_regime) 边——同一个 to_regime 来自不同 prev_regime
+    时经济含义可能完全相反（例如 "C → B" 是反弹回浅回撤、"A → B" 是高位破位），
+    必须按 4 元 (indicator, prev_regime, to_regime, h) 分别统计，避免方向混淆。
+
+    无前视 T+1 entry：信号在 t 日收盘观察到 (prev → to) 切换 → t+1 收盘建仓 → t+1+h 收盘平仓。
+
+    输出列：indicator, prev_regime, regime (=to_regime), h, n, mean_pct,
+            sharpe_ann, win_pct, t
+    """
     p = df["close_price"]
+    today = df[regime_col]
+    yest  = df[regime_col].shift(1)
+    is_event = (today != yest) & today.notna() & yest.notna()
     name = indicator_name or regime_col
+
     rows = []
     for h in horizons:
         fwd = p.shift(-(entry_lag + h)) / p.shift(-entry_lag) - 1
-        joined = pd.DataFrame({"regime": df[regime_col], "fwd": fwd}).dropna()
-        for r, g in joined.groupby("regime", observed=True):
+        joined = pd.DataFrame({
+            "prev_regime": yest.astype("object"),
+            "to_regime":   today.astype("object"),
+            "fwd":         fwd,
+            "is_event":    is_event,
+        })
+        joined = joined[joined["is_event"]].dropna(subset=["fwd", "prev_regime", "to_regime"])
+
+        for (prev, to), g in joined.groupby(["prev_regime", "to_regime"]):
             n = len(g)
             if n < 5:
                 continue
@@ -170,26 +185,25 @@ def regime_score(
             sharpe = (mu / sd) * np.sqrt(TRADING_DAYS_PER_YEAR / h) if sd > 0 else np.nan
             t      = (mu / (sd / np.sqrt(n)))                       if sd > 0 else np.nan
             rows.append({
-                "indicator":  name,
-                "regime":     str(r),
-                "h":          h,
-                "n":          n,
-                "mean_pct":   round(mu * 100, 3),
-                "sharpe_ann": round(sharpe, 2) if not np.isnan(sharpe) else np.nan,
-                "win_pct":    round((g["fwd"] > 0).mean() * 100, 1),
-                "t":          round(t, 2)      if not np.isnan(t)      else np.nan,
+                "indicator":   name,
+                "prev_regime": str(prev),
+                "regime":      str(to),
+                "h":           h,
+                "n":           n,
+                "mean_pct":    round(mu * 100, 3),
+                "sharpe_ann":  round(sharpe, 2) if not np.isnan(sharpe) else np.nan,
+                "win_pct":     round((g["fwd"] > 0).mean() * 100, 1),
+                "t":           round(t, 2)      if not np.isnan(t)      else np.nan,
             })
     return pd.DataFrame(rows)
 
 
 def build_event_scoreboard(df: pd.DataFrame) -> pd.DataFrame:
-    """对所有 5 个 indicator 跑事件去重版 regime_score，合并成大表。"""
+    """对 5 个 indicator 跑 directional regime_score，合并成大表。"""
     parts = []
     for name in INDICATORS:
         regime_col = INDICATOR_TO_REGIME_COL[name]
-        event_col  = f"{regime_col}_event"
-        df[event_col] = first_day_of_regime(df[regime_col])
-        parts.append(regime_score(df, event_col, indicator_name=name))
+        parts.append(regime_score(df, regime_col, indicator_name=name))
     out = pd.concat(parts, ignore_index=True)
     out["abs_t"] = out["t"].abs()
     return out
@@ -198,8 +212,17 @@ def build_event_scoreboard(df: pd.DataFrame) -> pd.DataFrame:
 # ─── Per-stock signal library (与 notebook §9 一致) ─────────────────────────
 
 
+def _sanitize_regime(s: str) -> str:
+    """把 regime label 里非字母数字 / 非 CJK 的字符替换成 `_`，用于 signal_id。"""
+    return "".join(c if c.isalnum() or "一" <= c <= "鿿" else "_" for c in s)
+
+
 def build_signal_library(scoreboard: pd.DataFrame) -> pd.DataFrame:
-    """从事件去重 scoreboard → 分级 + 仓位 + signal_id 信号库。"""
+    """从 directional event scoreboard → 分级 + 仓位 + signal_id 信号库 (v2)。
+
+    每条信号是一个有向边 (prev_regime → to_regime) 在某 horizon 的统计。
+    signal_id 格式: ``{indicator}::{sanitized_prev}->{sanitized_to}::h{h}``
+    """
     sig = scoreboard[scoreboard["abs_t"] >= 2.0].copy()
 
     def _tier(row):
@@ -213,25 +236,30 @@ def build_signal_library(scoreboard: pd.DataFrame) -> pd.DataFrame:
     sig[["tier", "size_pct"]] = sig.apply(lambda r: pd.Series(_tier(r)), axis=1)
     sig = sig[sig["tier"] != "reject"].copy()
     sig["direction"] = np.where(sig["mean_pct"] > 0, "long", "short")
+
     sig["signal_id"] = (
         sig["indicator"]
-        + "::" + sig["regime"].str.replace(r"[^\w一-鿿]", "_", regex=True)
+        + "::" + sig["prev_regime"].map(_sanitize_regime)
+        + "->" + sig["regime"].map(_sanitize_regime)
         + "::h" + sig["h"].astype(str)
     )
+
     tier_order = {"high": 0, "medium": 1, "low": 2, "trial": 3}
     sig["_ord"] = sig["tier"].map(tier_order)
     sig = sig.sort_values(["_ord", "abs_t"], ascending=[True, False]).drop(columns=["_ord", "abs_t"])
-    return sig[["signal_id", "indicator", "regime", "h", "direction", "n",
-                "mean_pct", "win_pct", "sharpe_ann", "t", "tier", "size_pct"]]
+
+    return sig[[
+        "signal_id", "indicator", "prev_regime", "regime", "h", "direction",
+        "n", "mean_pct", "win_pct", "sharpe_ann", "t", "tier", "size_pct",
+    ]]
 
 
 # ─── Cross-stock aggregation ────────────────────────────────────────────────
 
 
-def hypothesis_id(indicator: str, regime: str, h: int) -> str:
-    """跨股票 hypothesis 标识：indicator + regime + h（不含 direction）。"""
-    safe_regime = "".join(c if c.isalnum() or "一" <= c <= "鿿" else "_" for c in regime)
-    return f"{indicator}::{safe_regime}::h{h}"
+def hypothesis_id(indicator: str, prev_regime: str, regime: str, h: int) -> str:
+    """跨股票 hypothesis 标识 (v2)：indicator + (prev->to) + h（不含 direction）。"""
+    return f"{indicator}::{_sanitize_regime(prev_regime)}->{_sanitize_regime(regime)}::h{h}"
 
 
 def aggregate_cross_stock(
@@ -241,7 +269,8 @@ def aggregate_cross_stock(
     direction_threshold: float = 1.5,
 ) -> pd.DataFrame:
     """
-    把每只股票的 event scoreboard 拼成 (hypothesis × stock) 矩阵，
+    把每只股票的 directional event scoreboard 拼成 (hypothesis × stock) 矩阵，
+    hypothesis = (indicator, prev_regime, to_regime, h) 4 元，
     然后给每个 hypothesis 打 robustness 标签。
     """
     codes = list(scoreboards.keys())
@@ -249,11 +278,12 @@ def aggregate_cross_stock(
     all_h: dict[str, dict] = {}
     for code, sb in scoreboards.items():
         for _, r in sb.iterrows():
-            hid = hypothesis_id(r["indicator"], r["regime"], int(r["h"]))
+            hid = hypothesis_id(r["indicator"], r["prev_regime"], r["regime"], int(r["h"]))
             if hid not in all_h:
                 all_h[hid] = {
                     "hypothesis_id": hid,
                     "indicator":     r["indicator"],
+                    "prev_regime":   r["prev_regime"],
                     "regime":        r["regime"],
                     "h":             int(r["h"]),
                 }
@@ -328,7 +358,7 @@ def aggregate_cross_stock(
     df = df.sort_values(["_rank", "max_pass", "max_abs_t"],
                         ascending=[True, False, False]).drop(columns=["_rank"])
 
-    base_cols = ["hypothesis_id", "indicator", "regime", "h"]
+    base_cols = ["hypothesis_id", "indicator", "prev_regime", "regime", "h"]
     stock_cols = []
     for c in codes:
         stock_cols += [f"n_{c}", f"mean_{c}", f"t_{c}"]

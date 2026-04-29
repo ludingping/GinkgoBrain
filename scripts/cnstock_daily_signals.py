@@ -203,8 +203,10 @@ def detect_triggers(
     """
     返回 (今日 5 个 regime 状态, 今日触发的信号列表)。
 
-    "触发" = 目标日的 regime 与昨日不同（即 first day of regime）。
-    然后到该股票的 signal_lib 里找 (indicator × today's regime) 同时存在的条目。
+    v2 directional：触发条件 = 目标日的 (prev_regime → to_regime) 边在
+    signal_lib 里有匹配条目。同一个 to_regime 下来自不同 prev_regime
+    的样本经济含义可能完全相反（例如 dd::A->B 是高位破位、dd::C->B 是反弹），
+    所以必须按 (indicator, prev_regime, regime) 4 元匹配。
     """
     if target_date not in df["date"].values:
         return {}, []
@@ -227,13 +229,14 @@ def detect_triggers(
             continue
         states[indicator] = str(today_val)
 
-        is_event = (today_val != yest_val) and not pd.isna(today_val)
+        is_event = (today_val != yest_val) and not pd.isna(yest_val)
         if not is_event:
             continue
 
         matches = signal_lib[
-            (signal_lib["indicator"] == indicator) &
-            (signal_lib["regime"] == str(today_val))
+            (signal_lib["indicator"]   == indicator) &
+            (signal_lib["prev_regime"] == str(yest_val)) &
+            (signal_lib["regime"]      == str(today_val))
         ]
         for _, sig in matches.iterrows():
             triggered.append(TriggeredSignal(
