@@ -34,6 +34,27 @@ from strategies.cn_a_big_money_rotation.signal import (
     rank_cross_section,
     select_top_n,
 )
+from strategies.cn_a_big_money_rotation.portfolio import (
+    CAP_BUY_RATIO,
+    COMMISSION_RATE,
+    HOLDING_MIN_DAYS,
+    SLIPPAGE_RATE,
+    STAMP_DUTY_RATE,
+    CostParams,
+    Order,
+    Position,
+    PortfolioState,
+    Side,
+    apply_orders_at_t1,
+    buy_cost,
+    capacity_cap_for_buy,
+    decide_orders,
+    holdings_in_lock,
+    is_one_word_limit_down,
+    is_one_word_limit_up,
+    per_position_target,
+    sell_cost,
+)
 
 
 def test_smoke_package_importable():
@@ -571,3 +592,349 @@ class TestT12DualSignalOutput:
 
     def test_t12_target_top_n_default_20(self):
         assert TARGET_TOP_N == 20
+
+
+# ============================================================================
+# M4 组合/撮合层（T13-T21）
+# ============================================================================
+
+
+def _make_position(code: str, entry_step: int = 0, shares: float = 100.0,
+                   cost_basis: float = 10000.0) -> Position:
+    return Position(stock_code=code, entry_step=entry_step,
+                    shares=shares, cost_basis=cost_basis)
+
+
+class TestT13HoldingPeriodMin3Days:
+    """T13. 持有期 ≥ 3 日约束 ⭐核心 (§6)."""
+
+    def test_t13_step_1_locked(self):
+        """T 买 (entry_step=0) → step=1 仍锁定."""
+        positions = {"A": _make_position("A", entry_step=0)}
+        locked = holdings_in_lock(positions, current_step=1)
+        assert "A" in locked
+
+    def test_t13_step_2_locked(self):
+        positions = {"A": _make_position("A", entry_step=0)}
+        assert "A" in holdings_in_lock(positions, current_step=2)
+
+    def test_t13_step_3_still_locked(self):
+        """step=3 仍锁定（持有期 = 3 个完整交易日：1/2/3 不可卖）."""
+        positions = {"A": _make_position("A", entry_step=0)}
+        assert "A" in holdings_in_lock(positions, current_step=3)
+
+    def test_t13_step_4_unlocked(self):
+        """step=4 才可卖."""
+        positions = {"A": _make_position("A", entry_step=0)}
+        assert "A" not in holdings_in_lock(positions, current_step=4)
+
+    def test_t13_decide_orders_respects_lock(self):
+        """持有期内即使不在 new_selected，也不发 SELL."""
+        prev = {"A": _make_position("A", entry_step=0)}
+        orders = decide_orders(
+            prev_positions=prev,
+            new_selected=set(),               # A 不在 new_selected
+            holding_locked={"A"},             # 但仍在锁定
+            cash_avail=0.0,
+            total_assets=10000.0,
+        )
+        sells = [o for o in orders if o.side is Side.SELL]
+        assert sells == []
+
+    def test_t13_decide_orders_exits_after_lock(self):
+        """已过持有期 + 不在 new_selected → 发 SELL."""
+        prev = {"A": _make_position("A", entry_step=0)}
+        orders = decide_orders(
+            prev_positions=prev,
+            new_selected=set(),
+            holding_locked=set(),             # 已解锁
+            cash_avail=0.0,
+            total_assets=10000.0,
+        )
+        sells = [o for o in orders if o.side is Side.SELL]
+        assert len(sells) == 1
+        assert sells[0].stock_code == "A"
+
+    def test_t13_holding_min_days_default_3(self):
+        assert HOLDING_MIN_DAYS == 3
+
+
+class TestT14NoDailyRebalance:
+    """T14 Entry-only rebalance ⭐⭐⭐ 致命漏洞防线 (§6.1).
+
+    review 阶段识别的核心漏洞：日度等权 rebalance 会在 1 月内吃光 alpha.
+    """
+
+    def test_t14_pool_40_to_42_only_2_buys_zero_trims(self):
+        """持仓池 40 → 42 只 → 2 笔买单，0 trim 单（核心防线）."""
+        prev_positions = {
+            f"i{k:02d}": _make_position(f"i{k:02d}", entry_step=0, shares=100, cost_basis=1000)
+            for k in range(1, 41)
+        }
+        # T+1：新 selected = {i03..i42}；i01/i02 退出 selected 但仍持有期锁定（40 只全锁）
+        new_selected = {f"i{k:02d}" for k in range(3, 43)}
+        holding_locked = set(prev_positions.keys())  # 全部锁定
+
+        orders = decide_orders(
+            prev_positions=prev_positions,
+            new_selected=new_selected,
+            holding_locked=holding_locked,
+            cash_avail=100_000.0,
+            total_assets=1_000_000.0,
+        )
+        buys = [o for o in orders if o.side is Side.BUY]
+        sells = [o for o in orders if o.side is Side.SELL]
+        trims = [o for o in orders if o.is_rebalance_trim]
+
+        assert len(buys) == 2, f"应仅 2 笔新进场买单，实际 {len(buys)}"
+        assert {o.stock_code for o in buys} == {"i41", "i42"}
+        assert len(sells) == 0, "持有期锁定中不发卖单"
+        assert len(trims) == 0, "持有期间绝对不发 trim 单"
+
+    def test_t14_position_value_drift_no_trim(self):
+        """某持仓涨 30% 致权重偏离 → 不发 trim（权重自然漂移）."""
+        prev = {"A": _make_position("A", entry_step=0, shares=100, cost_basis=10000)}
+        # 假设 close 涨 30% → 当前价值 = 13000；total = cash + 13000
+        # 没有新 selected，也没有 unlocked，应该无任何订单
+        orders = decide_orders(
+            prev_positions=prev,
+            new_selected={"A"},               # A 还在 selected → 不卖
+            holding_locked={"A"},
+            cash_avail=5000.0,
+            total_assets=18000.0,             # 5000 cash + 13000 (A 涨 30%)
+        )
+        assert orders == []  # 0 trim, 0 buy, 0 sell
+
+    def test_t14_total_order_count_equals_buys_plus_sells(self):
+        """订单总数永远等于 buys + sells，没有第三种 trim 来源."""
+        prev = {f"i{k:02d}": _make_position(f"i{k:02d}", entry_step=10) for k in range(1, 21)}
+        # 5 只新进场 + 3 只退出（已解锁）
+        new_selected = (set(prev.keys()) - {"i01", "i02", "i03"}) | {"x01", "x02", "x03", "x04", "x05"}
+        orders = decide_orders(
+            prev_positions=prev,
+            new_selected=new_selected,
+            holding_locked=set(),
+            cash_avail=100_000.0,
+            total_assets=1_000_000.0,
+        )
+        buys = [o for o in orders if o.side is Side.BUY]
+        sells = [o for o in orders if o.side is Side.SELL]
+        assert len(buys) == 5
+        assert len(sells) == 3
+        assert len(orders) == len(buys) + len(sells)
+        assert all(not o.is_rebalance_trim for o in orders)
+
+
+class TestT15EntryAllocationFormula:
+    """T15. Entry 分配公式：min(cash/K, total/N) (§6.1)."""
+
+    def test_t15_cash_per_below_top_limit(self):
+        """cash=2e6, K=5, total=1e7, N=20 → per = min(4e5, 5e5) = 4e5."""
+        per = per_position_target(cash_avail=2e6, k_new_entries=5, total_assets=1e7, n_target=20)
+        assert per == pytest.approx(4e5)
+
+    def test_t15_cash_per_above_top_limit_capped(self):
+        """cash=2e6, K=2, total=1e7, N=20 → per = min(1e6, 5e5) = 5e5."""
+        per = per_position_target(cash_avail=2e6, k_new_entries=2, total_assets=1e7, n_target=20)
+        assert per == pytest.approx(5e5)
+
+    def test_t15_zero_entries(self):
+        per = per_position_target(cash_avail=2e6, k_new_entries=0, total_assets=1e7, n_target=20)
+        assert per == 0.0
+
+
+class TestT16LimitUpSkipBuy:
+    """T16. T+1 一字涨停跳过买入 ⭐ (§7.1)."""
+
+    def test_t16_limit_up_skip(self):
+        state = PortfolioState(cash=1_000_000.0, current_step=1)
+        orders = [Order(stock_code="A", side=Side.BUY, target_amount=10_000.0)]
+        result = apply_orders_at_t1(
+            state=state,
+            orders=orders,
+            t1_open={"A": 10.0},
+            t1_limit_up_flag={"A": True},     # 一字涨停
+            t1_limit_down_flag={"A": False},
+            cap_buy_amount={"A": 100_000.0},
+        )
+        assert state.cash == pytest.approx(1_000_000.0)  # cash 未动
+        assert "A" not in state.positions
+        assert len(result.fills) == 0
+        assert len(result.unfilled) == 1
+
+    def test_t16_normal_open_buy_executes(self):
+        state = PortfolioState(cash=1_000_000.0, current_step=1)
+        orders = [Order(stock_code="A", side=Side.BUY, target_amount=10_000.0)]
+        result = apply_orders_at_t1(
+            state=state,
+            orders=orders,
+            t1_open={"A": 10.0},
+            t1_limit_up_flag={"A": False},
+            t1_limit_down_flag={"A": False},
+            cap_buy_amount={"A": 100_000.0},  # cap 远大于 target
+        )
+        assert "A" in state.positions
+        assert len(result.fills) == 1
+        assert result.fills[0].fill_amount == pytest.approx(10_000.0)
+
+
+class TestT17LimitDownPostponeSell:
+    """T17. T+1 一字跌停顺延卖出 (§7.1)."""
+
+    def test_t17_limit_down_keeps_position(self):
+        state = PortfolioState(
+            cash=0.0, current_step=4,
+            positions={"A": _make_position("A", entry_step=0, shares=1000, cost_basis=10000)},
+        )
+        orders = [Order(stock_code="A", side=Side.SELL)]
+        result = apply_orders_at_t1(
+            state=state,
+            orders=orders,
+            t1_open={"A": 10.0},
+            t1_limit_up_flag={"A": False},
+            t1_limit_down_flag={"A": True},   # 一字跌停
+            cap_buy_amount={},
+        )
+        assert "A" in state.positions
+        assert state.cash == pytest.approx(0.0)
+        assert len(result.fills) == 0
+        assert len(result.unfilled) == 1
+
+    def test_t17_one_word_limit_predicates(self):
+        assert is_one_word_limit_up(11.0, 11.0, 11.0, 11.0) is True
+        assert is_one_word_limit_up(11.0, 11.0, 10.9, 11.0) is False
+        assert is_one_word_limit_down(9.0, 9.0, 9.0, 9.0) is True
+        assert is_one_word_limit_down(9.0, 9.5, 9.0, 9.0) is False
+
+
+class TestT18CapacityConstraintTruncate:
+    """T18. 容量约束截断 ⭐ (§7.2)."""
+
+    def test_t18_target_below_cap_full_fill(self):
+        """target=10 万, cap=25 万 → fill=10 万, unfilled=0."""
+        state = PortfolioState(cash=1_000_000.0, current_step=1)
+        orders = [Order(stock_code="A", side=Side.BUY, target_amount=100_000.0)]
+        result = apply_orders_at_t1(
+            state=state,
+            orders=orders,
+            t1_open={"A": 10.0},
+            t1_limit_up_flag={}, t1_limit_down_flag={},
+            cap_buy_amount={"A": 250_000.0},
+        )
+        assert result.fills[0].fill_amount == pytest.approx(100_000.0)
+        assert len(result.unfilled) == 0
+
+    def test_t18_target_above_cap_truncated(self):
+        """target=50 万, cap=12.5 万 → fill=12.5 万, unfilled=37.5 万."""
+        state = PortfolioState(cash=1_000_000.0, current_step=1)
+        orders = [Order(stock_code="A", side=Side.BUY, target_amount=500_000.0)]
+        result = apply_orders_at_t1(
+            state=state,
+            orders=orders,
+            t1_open={"A": 10.0},
+            t1_limit_up_flag={}, t1_limit_down_flag={},
+            cap_buy_amount={"A": 125_000.0},
+        )
+        assert result.fills[0].fill_amount == pytest.approx(125_000.0)
+        assert len(result.unfilled) == 1
+        assert result.unfilled[0].target_amount == pytest.approx(375_000.0)
+
+    def test_t18_capacity_cap_formula(self):
+        """avg_20d=5000 万 → cap = 0.25% × 5000 万 = 12.5 万."""
+        assert capacity_cap_for_buy(5e7) == pytest.approx(125_000.0)
+        assert capacity_cap_for_buy(1e8) == pytest.approx(250_000.0)
+
+    def test_t18_zero_avg_amount_zero_cap(self):
+        """流动性 0 → cap 0 → 全部 unfilled（universe 应已剔除，兜底）."""
+        state = PortfolioState(cash=1_000_000.0, current_step=1)
+        orders = [Order(stock_code="A", side=Side.BUY, target_amount=100_000.0)]
+        result = apply_orders_at_t1(
+            state=state,
+            orders=orders,
+            t1_open={"A": 10.0},
+            t1_limit_up_flag={}, t1_limit_down_flag={},
+            cap_buy_amount={"A": 0.0},
+        )
+        assert len(result.fills) == 0
+        assert len(result.unfilled) == 1
+
+
+class TestT19UnfilledCarryover:
+    """T19. Unfilled 顺延逻辑 (§7.2)."""
+
+    def test_t19_unfilled_amount_recorded(self):
+        """target=40 万, cap=10 万 → fill=10 万, unfilled Order 的 target_amount=30 万."""
+        state = PortfolioState(cash=1_000_000.0, current_step=1)
+        orders = [Order(stock_code="A", side=Side.BUY, target_amount=400_000.0)]
+        result = apply_orders_at_t1(
+            state=state,
+            orders=orders,
+            t1_open={"A": 10.0},
+            t1_limit_up_flag={}, t1_limit_down_flag={},
+            cap_buy_amount={"A": 100_000.0},
+        )
+        assert result.fills[0].fill_amount == pytest.approx(100_000.0)
+        assert result.unfilled[0].target_amount == pytest.approx(300_000.0)
+
+    def test_t19_fill_position_holding_period_starts_at_fill_step(self):
+        """fill 入仓的 entry_step = state.current_step（顺延后再 fill 时 entry 推到当时 step）."""
+        state = PortfolioState(cash=1_000_000.0, current_step=5)
+        orders = [Order(stock_code="A", side=Side.BUY, target_amount=10_000.0)]
+        apply_orders_at_t1(
+            state=state,
+            orders=orders,
+            t1_open={"A": 10.0},
+            t1_limit_up_flag={}, t1_limit_down_flag={},
+            cap_buy_amount={"A": 100_000.0},
+        )
+        assert state.positions["A"].entry_step == 5
+
+
+class TestT20ExitFullClose:
+    """T20. 卖出全清 (§6.1)."""
+
+    def test_t20_sell_clears_full_shares(self):
+        """卖出条件触发 → 一次性清空 position."""
+        state = PortfolioState(
+            cash=0.0, current_step=4,
+            positions={"A": _make_position("A", entry_step=0, shares=1000, cost_basis=10000)},
+        )
+        orders = [Order(stock_code="A", side=Side.SELL)]
+        result = apply_orders_at_t1(
+            state=state,
+            orders=orders,
+            t1_open={"A": 12.0},   # 涨 20%
+            t1_limit_up_flag={}, t1_limit_down_flag={},
+            cap_buy_amount={},
+        )
+        assert "A" not in state.positions
+        # 单笔卖单（不分批）
+        sell_fills = [f for f in result.fills if f.side is Side.SELL]
+        assert len(sell_fills) == 1
+        assert sell_fills[0].fill_shares == pytest.approx(1000.0)
+        # 现金回收（扣 sell_cost）
+        gross = 1000 * 12.0  # 12000
+        expected_cash = gross - sell_cost(gross)
+        assert state.cash == pytest.approx(expected_cash)
+
+
+class TestT21TransactionCost:
+    """T21. 成本计算 (§7.1)."""
+
+    def test_t21_buy_cost_75_per_100k(self):
+        """买入 10 万 → 75 元 ≈ 0.075%（佣金 25 + 滑点 50）."""
+        assert buy_cost(100_000.0) == pytest.approx(75.0)
+
+    def test_t21_sell_cost_125_per_100k(self):
+        """卖出 10 万 → 125 元 ≈ 0.125%（佣金 25 + 印花税 50 + 滑点 50）."""
+        assert sell_cost(100_000.0) == pytest.approx(125.0)
+
+    def test_t21_round_trip_200_per_100k(self):
+        """往返 10 万 = 75 + 125 = 200 元 ≈ 0.20%."""
+        assert buy_cost(100_000.0) + sell_cost(100_000.0) == pytest.approx(200.0)
+
+    def test_t21_cost_rate_constants(self):
+        assert COMMISSION_RATE == 0.00025
+        assert STAMP_DUTY_RATE == 0.0005
+        assert SLIPPAGE_RATE == 0.0005
+        assert CAP_BUY_RATIO == pytest.approx(0.0025)
