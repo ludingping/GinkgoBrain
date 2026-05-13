@@ -123,6 +123,84 @@ def select_top_n(
     return out.sort_values(by=rank_col, kind="mergesort").reset_index(drop=True)
 
 
+# ============================================================================
+# v0.2 panel signal（持续吸筹 + 价格温和；2026-05-13 反向 bug 修复后验证有 alpha）
+# ============================================================================
+
+V0_2_N_WINDOW = 10
+V0_2_POSITIVE_DAYS_MIN = 7
+V0_2_PRICE_RANGE: tuple[float, float] = (-0.05, 0.08)
+
+
+def compute_v0_2_panel(
+    inflow_pivot: pd.DataFrame,
+    amount_pivot: pd.DataFrame,
+    close_pivot: pd.DataFrame,
+    n_window: int = V0_2_N_WINDOW,
+    positive_days_min: int = V0_2_POSITIVE_DAYS_MIN,
+    price_range: tuple[float, float] = V0_2_PRICE_RANGE,
+) -> dict[str, pd.DataFrame]:
+    """计算 v0.2 panel 信号（date × stock_code 矩阵形式）.
+
+    Args:
+        inflow_pivot:  (trade_date × stock_code) 矩阵；每格 = 当日 big_net_inflow.
+        amount_pivot:  (trade_date × stock_code) 矩阵；每格 = 当日 total_amount.
+        close_pivot:   (trade_date × stock_code) 矩阵；每格 = 当日 close_price.
+        n_window: 滚动窗口长度（默认 10 日）.
+        positive_days_min: C1 持续性门槛（窗口内 ≥ 多少日大单净流入为正）.
+        price_range: C3 价格温和区间 (low, high)，对应"过去 n 日累计涨幅".
+
+    Returns:
+        dict with keys:
+          - score: 累计大单净流入 / 累计总成交额（无过滤）
+          - score_filtered: 应用 C1 + C3 后保留的 score, 不通过的为 NaN
+          - positive_days, cum_inflow, cum_amount, price_change_n: 中间量
+          - mask_c1, mask_c3, final_mask: bool 矩阵
+    """
+    cum_inflow = inflow_pivot.rolling(window=n_window, min_periods=n_window).sum()
+    cum_amount = amount_pivot.rolling(window=n_window, min_periods=n_window).sum()
+    score = cum_inflow / cum_amount.replace(0, np.nan)
+    positive_days = (inflow_pivot > 0).rolling(window=n_window, min_periods=n_window).sum()
+    price_change_n = close_pivot / close_pivot.shift(n_window - 1) - 1.0
+
+    mask_c1 = positive_days >= positive_days_min
+    mask_c3 = (price_change_n >= price_range[0]) & (price_change_n <= price_range[1])
+    mask_score = score.notna()
+    final_mask = mask_c1 & mask_c3 & mask_score
+
+    return {
+        "score": score,
+        "score_filtered": score.where(final_mask),
+        "positive_days": positive_days,
+        "cum_inflow": cum_inflow,
+        "cum_amount": cum_amount,
+        "price_change_n": price_change_n,
+        "mask_c1": mask_c1,
+        "mask_c3": mask_c3,
+        "final_mask": final_mask,
+    }
+
+
+def select_v0_2_top_n_for_date(
+    score_filtered_row: pd.Series,
+    universe_codes: Iterable[str],
+    n: int = TARGET_TOP_N,
+) -> list[str]:
+    """单日选 v0.2 Top-N：在 universe ∩ score_filtered 非 NaN 集合内按 score 降序排.
+
+    tie-break：stock_code 字典序升序（确定性）.
+    """
+    u = set(universe_codes)
+    s = score_filtered_row.reindex([c for c in score_filtered_row.index if c in u]).dropna()
+    if len(s) == 0:
+        return []
+    sorted_codes = sorted(s.index, key=lambda c: (-float(s[c]), c))
+    return sorted_codes[:n]
+
+
+# ============================================================================
+
+
 def dual_signal_overlap(
     selected_a: Iterable[str],
     selected_b: Iterable[str],

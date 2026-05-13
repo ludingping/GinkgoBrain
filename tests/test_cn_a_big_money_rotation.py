@@ -92,10 +92,12 @@ class TestT1FloatShareRecovery:
 
     def test_t1_consistent(self):
         """自洽数据：主路径与互验路径都得 1e8 股，偏差 0%，不标异常."""
+        # fixture 单位匹配 Spider 实际：float_market_cap "百元"、total_volume "百万股"
+        # → share_main = 1e7 × 100 / 10 = 1e8 股；share_check = 10 × 1e6 / 0.10 = 1e8 股
         row = dict(
-            float_market_cap=1e9,
+            float_market_cap=1e7,
             current_price=10.0,
-            total_volume=1e7,
+            total_volume=10.0,
             turnover_rate=10.0,
         )
         r = recover_float_share(row)
@@ -109,9 +111,9 @@ class TestT1FloatShareRecovery:
     def test_t1_minor_deviation_no_anomaly(self):
         """偏差 ~4.2% < 5% → 不标异常."""
         row = dict(
-            float_market_cap=1e9,
+            float_market_cap=1e7,
             current_price=10.0,
-            total_volume=1e7,
+            total_volume=10.0,
             turnover_rate=9.6,
         )
         r = recover_float_share(row)
@@ -123,9 +125,9 @@ class TestT1FloatShareRecovery:
     def test_t1_large_deviation_marks_anomaly(self):
         """偏差 ~30% > 5% → anomaly=True 且标 share_recover_anomaly."""
         row = dict(
-            float_market_cap=1e9,
+            float_market_cap=1e7,
             current_price=10.0,
-            total_volume=1e7,
+            total_volume=10.0,
             turnover_rate=7.0,
         )
         r = recover_float_share(row)
@@ -137,9 +139,9 @@ class TestT1FloatShareRecovery:
     def test_t1_main_zero_division_fallback_to_check(self):
         """current_price=0 → 主路径不可用，回退互验，标 main_path_zero_division."""
         row = dict(
-            float_market_cap=1e9,
+            float_market_cap=1e7,
             current_price=0.0,
-            total_volume=1e7,
+            total_volume=10.0,
             turnover_rate=10.0,
         )
         r = recover_float_share(row)
@@ -151,9 +153,9 @@ class TestT1FloatShareRecovery:
     def test_t1_check_path_zero_division_no_anomaly(self):
         """turnover_rate=0 → 互验跳过，输出主路径，不标异常（数据稀疏不是错误）."""
         row = dict(
-            float_market_cap=1e9,
+            float_market_cap=1e7,
             current_price=10.0,
-            total_volume=1e7,
+            total_volume=10.0,
             turnover_rate=0.0,
         )
         r = recover_float_share(row)

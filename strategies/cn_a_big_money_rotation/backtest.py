@@ -42,7 +42,17 @@ from .data import (
     recover_float_share,
 )
 from .universe import daily_universe
-from .signal import compute_signals, select_top_n, dual_signal_overlap, TARGET_TOP_N
+from .signal import (
+    TARGET_TOP_N,
+    V0_2_N_WINDOW,
+    V0_2_POSITIVE_DAYS_MIN,
+    V0_2_PRICE_RANGE,
+    compute_signals,
+    compute_v0_2_panel,
+    dual_signal_overlap,
+    select_top_n,
+    select_v0_2_top_n_for_date,
+)
 from .portfolio import (
     HOLDING_MIN_DAYS,
     CostParams,
@@ -84,6 +94,13 @@ class BacktestConfig:
     holding_min_days: int = HOLDING_MIN_DAYS
     forward_ic_horizon: int = 4              # T+horizon 累计收益做 IC 验证
     output_dir: Path = Path("reports")
+    # 信号策略（2026-05-13 加入）：
+    #   "v0_1" = 单日 big_net_per_mv 排序（baseline）
+    #   "v0_2" = 持续吸筹 + 价格温和 + 占成交比排序（spike 验证有正向 alpha）
+    signal_strategy: str = "v0_1"
+    v0_2_n_window: int = V0_2_N_WINDOW
+    v0_2_positive_days_min: int = V0_2_POSITIVE_DAYS_MIN
+    v0_2_price_range: tuple[float, float] = V0_2_PRICE_RANGE
 
 
 @dataclass
@@ -98,6 +115,7 @@ class BacktestResult:
     verdict: Verdict
     verdict_notes: dict[str, Any]
     extra_notes: dict[str, Any] = field(default_factory=dict)
+    diagnostics: pd.DataFrame | None = None  # 每日 diag：universe/positions/cash/overlap
 
 
 # ============================================================================
@@ -249,6 +267,36 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
     trade_dates = sorted(set(money_flow["trade_date"]) & set(kline["trade_date"]))
     logger.info("Backtest spans %d trade dates", len(trade_dates))
 
+    # v0.2 panel 预计算（仅 signal_strategy="v0_2" 时）
+    v0_2_panel: dict | None = None
+    if cfg.signal_strategy == "v0_2":
+        logger.info("Pre-computing v0.2 panel (N=%d, M≥%d, price=%s) ...",
+                    cfg.v0_2_n_window, cfg.v0_2_positive_days_min, cfg.v0_2_price_range)
+        # 派生 big_net_inflow / total_amount（v0.1 在主循环内派生，v0.2 需要整表）
+        mf_for_panel = compute_money_flow_factors(money_flow)
+        inflow_pivot = mf_for_panel.pivot_table(
+            index="trade_date", columns="stock_code", values="big_net_inflow", aggfunc="first"
+        )
+        amount_pivot = mf_for_panel.pivot_table(
+            index="trade_date", columns="stock_code", values="total_amount", aggfunc="first"
+        )
+        close_pivot = kline.pivot_table(
+            index="trade_date", columns="stock_code", values="close_price", aggfunc="first"
+        )
+        # 索引交集
+        common_dates = sorted(set(inflow_pivot.index) & set(close_pivot.index))
+        common_codes = sorted(set(inflow_pivot.columns) & set(close_pivot.columns))
+        v0_2_panel = compute_v0_2_panel(
+            inflow_pivot.loc[common_dates, common_codes],
+            amount_pivot.loc[common_dates, common_codes],
+            close_pivot.loc[common_dates, common_codes],
+            n_window=cfg.v0_2_n_window,
+            positive_days_min=cfg.v0_2_positive_days_min,
+            price_range=cfg.v0_2_price_range,
+        )
+        logger.info("v0.2 panel computed: score_filtered non-NaN = %d",
+                    int(v0_2_panel["score_filtered"].notna().sum().sum()))
+
     state = PortfolioState(cash=cfg.initial_capital, current_step=0)
     cost_params = CostParams()
 
@@ -259,6 +307,7 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
     selected_history: dict[Any, list[str]] = {}
     score_history: dict[Any, pd.DataFrame] = {}
     bm2_equity: list[float] = [1.0]
+    diag_rows: list[dict[str, Any]] = []  # 每日 diagnostics
 
     pending_orders: list = []
     pending_orders_metadata: dict | None = None
@@ -333,19 +382,69 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
             pending_orders_metadata = None
             bm2_equity.append(bm2_equity[-1])
             continue
-        factor_df = mf_today.loc[codes_with_data].reset_index()
-        factor_df["float_mv"] = [
-            float_share_map.get(c, np.nan) * close_map.get(c, np.nan)
-            for c in factor_df["stock_code"]
-        ]
-        factor_df = compute_money_flow_factors(factor_df)
-        signals = compute_signals(factor_df)
-        score_history[t] = signals[["stock_code", "score_A", "score_B"]].copy()
+        name_map = dict(zip(sec_list["stock_code"], sec_list["stock_name"]))
 
-        # ---- 5. 选 Top N ----
-        selected = select_top_n(signals, n=cfg.n_target)
-        selected_codes = set(selected["stock_code"].tolist())
-        selected_history[t] = list(selected_codes)
+        if cfg.signal_strategy == "v0_2" and v0_2_panel is not None:
+            # ---- v0.2: 复用预计算 panel；C1+C3 过滤已在 panel 完成 ----
+            if t not in v0_2_panel["score_filtered"].index:
+                pending_orders = []
+                pending_orders_metadata = None
+                bm2_equity.append(bm2_equity[-1])
+                continue
+            score_row = v0_2_panel["score_filtered"].loc[t]
+            sel_list = select_v0_2_top_n_for_date(score_row, universe, n=cfg.n_target)
+            if not sel_list:
+                # 当日 universe 内无 C1+C3 通过的标的
+                score_history[t] = pd.DataFrame({
+                    "stock_code": [], "score_A": [], "score_B": [],
+                })
+                pending_orders = []
+                pending_orders_metadata = None
+                bm2_equity.append(bm2_equity[-1])
+                continue
+            # 全 universe 的 score_A（filtered 后；NaN 自然排末尾）
+            all_filtered = score_row.reindex(list(universe)).dropna()
+            score_history[t] = pd.DataFrame({
+                "stock_code": list(all_filtered.index),
+                "score_A": all_filtered.values,
+                "score_B": np.nan,
+            })
+            selected_codes = set(sel_list)
+            cum_inflow_row = v0_2_panel["cum_inflow"].loc[t]
+            cum_amount_row = v0_2_panel["cum_amount"].loc[t]
+            selected_with_name = pd.DataFrame({
+                "stock_code": sel_list,
+                "rank_A": list(range(1, len(sel_list) + 1)),
+                "score_A": [float(score_row[c]) for c in sel_list],
+                "score_B": [np.nan] * len(sel_list),
+                "big_net_inflow": [float(cum_inflow_row.get(c, np.nan)) for c in sel_list],
+                "total_amount": [float(cum_amount_row.get(c, np.nan)) for c in sel_list],
+                "float_mv": [
+                    float_share_map.get(c, np.nan) * close_map.get(c, np.nan)
+                    for c in sel_list
+                ],
+                "stock_name": [name_map.get(c) for c in sel_list],
+            })
+            selected_history[t] = selected_with_name
+        else:
+            # ---- v0.1（默认）: 单日 big_net_per_mv 排序 ----
+            factor_df = mf_today.loc[codes_with_data].reset_index()
+            factor_df["float_mv"] = [
+                float_share_map.get(c, np.nan) * close_map.get(c, np.nan)
+                for c in factor_df["stock_code"]
+            ]
+            factor_df = compute_money_flow_factors(factor_df)
+            signals = compute_signals(factor_df)
+            score_history[t] = signals[["stock_code", "score_A", "score_B"]].copy()
+
+            selected = select_top_n(signals, n=cfg.n_target)
+            selected_codes = set(selected["stock_code"].tolist())
+            selected_with_name = selected[[
+                "stock_code", "rank_A", "score_A", "score_B",
+                "big_net_inflow", "total_amount", "float_mv",
+            ]].copy()
+            selected_with_name["stock_name"] = selected_with_name["stock_code"].map(name_map)
+            selected_history[t] = selected_with_name
 
         # ---- 6. BM2 等权 universe 日度收益 ----
         if step > 0:
@@ -390,6 +489,24 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
         pending_orders = orders
         pending_orders_metadata = {"cap_buy": cap_buy}
 
+        # ---- 8. 记 diagnostics ----
+        # 双信号选股 overlap（A 主 vs B Top-N）；v0.2 只有单信号，overlap=NaN
+        if cfg.signal_strategy == "v0_2":
+            diag_overlap = float("nan")
+        else:
+            s_b_sorted = signals.sort_values("score_B", ascending=False)
+            sel_b = set(s_b_sorted["stock_code"].head(cfg.n_target).tolist())
+            diag_overlap = dual_signal_overlap(selected_codes, sel_b)
+        diag_rows.append({
+            "trade_date": t,
+            "universe_size": len(universe),
+            "selected_size": len(selected_codes),
+            "n_positions": len(state.positions),
+            "cash": state.cash,
+            "equity": equity,
+            "overlap_ab": diag_overlap,
+        })
+
         if step % 20 == 0:
             logger.info("step %d/%d (%s) | universe=%d selected=%d pos=%d cash=%.0f eq=%.0f",
                         step, len(trade_dates), t, len(universe), len(selected_codes),
@@ -412,21 +529,25 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
     )
     bm2_daily_ret = bm2_equity_series.pct_change().fillna(0.0)
 
+    # IC fwd_ret 修复（2026-05-13）：之前用 close[T] 当起点有数据泄漏
+    # 修正：T+1 close 起点 → T+horizon close 终点（实盘 T+1 开盘买入，approximate by close）
     sorted_dates = sorted(score_history.keys())
     for i, t in enumerate(sorted_dates):
+        t_plus_1_idx = i + 1
         target_idx = i + cfg.forward_ic_horizon
-        if target_idx >= len(sorted_dates):
+        if target_idx >= len(sorted_dates) or t_plus_1_idx >= len(sorted_dates):
             continue
+        t_plus_1 = sorted_dates[t_plus_1_idx]
         t_future = sorted_dates[target_idx]
-        if t not in kline_by_date or t_future not in kline_by_date:
+        if t_plus_1 not in kline_by_date or t_future not in kline_by_date:
             continue
-        close_t_series = kline_by_date[t]["close_price"].astype(float)
-        close_future_series = kline_by_date[t_future]["close_price"].astype(float)
+        close_start = kline_by_date[t_plus_1]["close_price"].astype(float)
+        close_end = kline_by_date[t_future]["close_price"].astype(float)
         scores = score_history[t].set_index("stock_code")
         codes = scores.index
         rets = pd.Series(
-            [(close_future_series.get(c, np.nan) - close_t_series.get(c, np.nan)) / close_t_series.get(c, np.nan)
-             if close_t_series.get(c, 0) and close_t_series.get(c, 0) > 0 else np.nan
+            [(close_end.get(c, np.nan) - close_start.get(c, np.nan)) / close_start.get(c, np.nan)
+             if close_start.get(c, 0) and close_start.get(c, 0) > 0 else np.nan
              for c in codes],
             index=codes,
         )
@@ -456,13 +577,14 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
     monthly_turnover = 0.30  # 占位；M7 中可由 fills 精确算
 
     daily_overlap_list = []
-    for t, sel_a in selected_history.items():
+    for t, sel_df in selected_history.items():
         if t not in score_history:
             continue
         s = score_history[t]
         s_b_sorted = s.sort_values("score_B", ascending=False)
         sel_b = s_b_sorted["stock_code"].head(cfg.n_target).tolist()
-        daily_overlap_list.append(dual_signal_overlap(sel_a, sel_b))
+        sel_a_codes = sel_df["stock_code"].tolist() if hasattr(sel_df, "columns") else sel_df
+        daily_overlap_list.append(dual_signal_overlap(sel_a_codes, sel_b))
     overlap_ab = float(np.mean(daily_overlap_list)) if daily_overlap_list else 0.0
 
     metrics = StrategyMetrics(
@@ -501,6 +623,8 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
         "n_ic_observations": len(daily_ic_a),
     }
 
+    diagnostics_df = pd.DataFrame(diag_rows).set_index("trade_date") if diag_rows else None
+
     return BacktestResult(
         daily_returns=daily_ret_series,
         equity_curve=equity_series,
@@ -512,6 +636,7 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
         verdict=verdict,
         verdict_notes=verdict_notes,
         extra_notes=extra_notes,
+        diagnostics=diagnostics_df,
     )
 
 
@@ -583,6 +708,29 @@ def write_reports(result: BacktestResult, run_dir: Path) -> None:
     df_ic = pd.DataFrame({"ic_a": result.daily_ic_a, "ic_b": result.daily_ic_b})
     df_ic.to_csv(run_dir / "daily_ic.csv", index_label="day_idx")
 
+    if result.diagnostics is not None and len(result.diagnostics) > 0:
+        result.diagnostics.to_csv(run_dir / "daily_diagnostics.csv")
+
+    # daily_top20.csv：把每日选股长表 dump 出来
+    if result.selected_history:
+        rows = []
+        for t, sel in result.selected_history.items():
+            if hasattr(sel, "columns"):  # DataFrame
+                for r in sel.itertuples():
+                    rows.append({
+                        "trade_date": t,
+                        "rank_A": int(r.rank_A),
+                        "stock_code": r.stock_code,
+                        "stock_name": getattr(r, "stock_name", None),
+                        "score_A": float(r.score_A) if pd.notna(r.score_A) else None,
+                        "score_B": float(r.score_B) if pd.notna(r.score_B) else None,
+                        "big_net_inflow": float(r.big_net_inflow) if pd.notna(r.big_net_inflow) else None,
+                        "total_amount": float(r.total_amount) if pd.notna(r.total_amount) else None,
+                        "float_mv": float(r.float_mv) if pd.notna(r.float_mv) else None,
+                    })
+        if rows:
+            pd.DataFrame(rows).to_csv(run_dir / "daily_top20.csv", index=False)
+
 
 # ============================================================================
 # CLI
@@ -598,6 +746,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--end", type=_parse_date, required=True)
     parser.add_argument("--initial-capital", type=float, default=1e7)
     parser.add_argument("--output-dir", type=Path, default=Path("reports"))
+    parser.add_argument("--signal", choices=["v0_1", "v0_2"], default="v0_1",
+                        help="信号策略：v0_1 (单日 big_net_per_mv) 或 v0_2 (持续吸筹+价格温和)")
+    parser.add_argument("--v02-price-low", type=float, default=V0_2_PRICE_RANGE[0],
+                        help="v0.2 C3 价格区间下限（默认 -0.05）")
+    parser.add_argument("--v02-price-high", type=float, default=V0_2_PRICE_RANGE[1],
+                        help="v0.2 C3 价格区间上限（默认 +0.08）")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -614,7 +768,11 @@ def main(argv: list[str] | None = None) -> int:
         end=args.end,
         initial_capital=args.initial_capital,
         output_dir=args.output_dir,
+        signal_strategy=args.signal,
+        v0_2_price_range=(args.v02_price_low, args.v02_price_high),
     )
+    logger.info("signal_strategy = %s, v0.2 price range = %s",
+                cfg.signal_strategy, cfg.v0_2_price_range)
     result = run_backtest(cfg)
     write_reports(result, run_dir)
     print(f"\nVERDICT: {result.verdict.value}")

@@ -28,6 +28,13 @@ logger = logging.getLogger(__name__)
 
 ANOMALY_DEVIATION_THRESHOLD = 0.05  # 主路径与互验路径偏差超过 5% 标异常
 
+# GinkgoSpider cnstock_daily_snapshot 字段单位修正（2026-05-13 经验证）：
+# - float_market_cap / total_market_cap：实际是"百元"单位（值 × 100 = 真实元数）
+# - total_volume：实际是"百万股"单位（值 × 1e6 = 真实股数）
+# 其他字段：current_price/turnover_rate/total_amount 单位为元/%/元（与字段名一致）
+SNAPSHOT_MV_TO_YUAN = 100        # float_market_cap × 100 = 元
+SNAPSHOT_VOLUME_TO_SHARES = 1e6  # total_volume × 1e6 = 股
+
 
 @dataclass
 class FloatShareRecovery:
@@ -60,7 +67,7 @@ def recover_float_share(row: dict[str, Any]) -> FloatShareRecovery:
     tv = row.get("total_volume")
     tr = row.get("turnover_rate")
 
-    # ---- 主路径 ----
+    # ---- 主路径（修正单位：float_market_cap × 100 → 元）----
     share_main: float | None
     if cp is None or float(cp) == 0.0:
         share_main = None
@@ -69,16 +76,16 @@ def recover_float_share(row: dict[str, Any]) -> FloatShareRecovery:
         share_main = None
         notes["main_path_missing_mv"] = True
     else:
-        share_main = float(fm) / float(cp)
+        share_main = float(fm) * SNAPSHOT_MV_TO_YUAN / float(cp)
 
-    # ---- 互验路径 ----
+    # ---- 互验路径（修正单位：total_volume × 1e6 → 股）----
     share_check: float | None
     if tr is None or float(tr) == 0.0:
         share_check = None
     elif tv is None:
         share_check = None
     else:
-        share_check = float(tv) / (float(tr) / 100.0)
+        share_check = float(tv) * SNAPSHOT_VOLUME_TO_SHARES / (float(tr) / 100.0)
 
     # ---- 偏差 / share / anomaly ----
     deviation: float | None = None
