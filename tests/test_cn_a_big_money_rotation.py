@@ -55,6 +55,24 @@ from strategies.cn_a_big_money_rotation.portfolio import (
     per_position_target,
     sell_cost,
 )
+from strategies.cn_a_big_money_rotation.evaluate import (
+    CHURNING_RED_LINE,
+    IC_MEAN_THRESHOLD,
+    IC_TSTAT_THRESHOLD,
+    DualSignalStatus,
+    ICStats,
+    StrategyMetrics,
+    Verdict,
+    annualize_return,
+    classify_dual_signal,
+    compute_ic,
+    compute_ic_stats,
+    compute_information_ratio,
+    compute_max_drawdown,
+    compute_sharpe,
+    detect_unstable_window,
+    render_verdict,
+)
 
 
 def test_smoke_package_importable():
@@ -938,3 +956,256 @@ class TestT21TransactionCost:
         assert STAMP_DUTY_RATE == 0.0005
         assert SLIPPAGE_RATE == 0.0005
         assert CAP_BUY_RATIO == pytest.approx(0.0025)
+
+
+# ============================================================================
+# M5 评估层（T22-T29）
+# ============================================================================
+
+
+def _baseline_metrics(**overrides) -> StrategyMetrics:
+    """造一个"全部通过门槛"的 metrics fixture；按 overrides 改单项."""
+    base = dict(
+        ic_a=ICStats(mean=0.03, std=0.10, t_stat=4.84, n=260),
+        ic_b=ICStats(mean=0.025, std=0.10, t_stat=4.0, n=260),
+        cumulative_return=0.20,
+        annualized_return=0.18,
+        excess_return_bm1=0.06,
+        excess_return_bm2=0.04,
+        ir_bm1=0.5,
+        ir_bm2=0.4,
+        max_drawdown=-0.20,
+        max_relative_dd_bm1=-0.10,
+        monthly_turnover=0.40,
+        sharpe=1.0,
+        overlap_ab=0.7,
+    )
+    base.update(overrides)
+    return StrategyMetrics(**base)
+
+
+class TestT22ICComputation:
+    """T22. IC 计算正确性 ⭐."""
+
+    def test_t22_perfect_positive_correlation(self):
+        scores = pd.Series([1, 2, 3, 4, 5])
+        rets = pd.Series([0.1, 0.2, 0.3, 0.4, 0.5])
+        assert compute_ic(scores, rets) == pytest.approx(1.0)
+
+    def test_t22_perfect_negative_correlation(self):
+        scores = pd.Series([1, 2, 3, 4, 5])
+        rets = pd.Series([0.5, 0.4, 0.3, 0.2, 0.1])
+        assert compute_ic(scores, rets) == pytest.approx(-1.0)
+
+    def test_t22_no_correlation_near_zero(self):
+        """随机配对 → IC ≈ 0（容差大些 0.3，5 个样本噪声大）."""
+        np.random.seed(42)
+        scores = pd.Series(np.random.randn(100))
+        rets = pd.Series(np.random.randn(100))
+        ic = compute_ic(scores, rets)
+        assert abs(ic) < 0.3
+
+    def test_t22_tstat_260days(self):
+        """260 日 IC mean=0.03 std=0.10 → t ≈ 0.03/(0.10/√260) ≈ 4.84."""
+        daily = pd.Series([0.03] * 260)
+        # mean = 0.03, std = 0 → 我们手动构造非零 std
+        rng = np.random.default_rng(0)
+        daily = pd.Series(0.03 + 0.10 * rng.standard_normal(260))
+        stats = compute_ic_stats(daily)
+        assert stats.n == 260
+        assert stats.mean == pytest.approx(0.03, abs=0.02)
+        # t-stat 应在 4.84 附近；容差给宽
+        assert stats.t_stat == pytest.approx(stats.mean / (stats.std / np.sqrt(260)), rel=1e-9)
+
+    def test_t22_nan_excluded(self):
+        """某些日期 NaN → 不入均值."""
+        daily = pd.Series([0.02, np.nan, 0.03, np.nan, 0.04])
+        stats = compute_ic_stats(daily)
+        assert stats.n == 3
+        assert stats.mean == pytest.approx(0.03)
+
+    def test_t22_empty_returns_nan(self):
+        stats = compute_ic_stats(pd.Series([np.nan, np.nan]))
+        assert stats.n == 0
+        assert np.isnan(stats.mean)
+
+    def test_t22_passes_method(self):
+        passing = ICStats(mean=0.03, std=0.10, t_stat=4.0, n=260)
+        failing_mean = ICStats(mean=0.015, std=0.10, t_stat=4.0, n=260)
+        failing_t = ICStats(mean=0.03, std=0.10, t_stat=2.5, n=260)
+        assert passing.passes()
+        assert not failing_mean.passes()
+        assert not failing_t.passes()
+
+
+class TestT23DualBenchmarkExcessReturn:
+    """T23. 双基准超额计算 ⭐."""
+
+    def test_t23_annualize_geometric(self):
+        """13 月（即 273 个交易日近似）累计 15% → 年化 ≈ 13.8%."""
+        n = 273  # 13 months × 21
+        # cumulative 15%
+        ann = annualize_return(0.15, n_periods=n, periods_per_year=252)
+        # base=1.15, exp = 252/273 ≈ 0.923 → 1.15^0.923 ≈ 1.1375 → 13.75%
+        assert ann == pytest.approx(0.138, abs=0.005)
+
+    def test_t23_information_ratio(self):
+        strat = pd.Series([0.001] * 252)  # 日均 0.1%
+        bench = pd.Series([0.0005] * 252)
+        # diff = 0.0005，std = 0 → IR = 0 (设计安排零除返回 0)
+        ir = compute_information_ratio(strat, bench)
+        assert ir == 0.0
+
+    def test_t23_information_ratio_with_volatility(self):
+        """构造已知 mean / std 的 diff 序列：±X 围绕 Y 振荡 → 可算出 IR 闭式解."""
+        # diff 序列: 在 Y=0.005 上下波动 ±0.01 → mean=0.005, std (ddof=1) 可算
+        diff_array = np.array([0.015, -0.005] * 126)  # 252 days
+        strat = pd.Series(diff_array)
+        bench = pd.Series([0.0] * 252)
+        ir = compute_information_ratio(strat, bench)
+        # 闭式期望
+        expected_mean = float(diff_array.mean())          # 0.005
+        expected_std = float(diff_array.std(ddof=1))      # ≈ 0.01002
+        expected_ir = expected_mean / expected_std * np.sqrt(252)
+        assert ir == pytest.approx(expected_ir, rel=1e-6)
+        assert expected_ir > 7.0  # 量级 sanity check
+
+    def test_t23_max_drawdown(self):
+        equity = pd.Series([1.0, 1.2, 0.9, 1.1, 0.8, 1.3])
+        # 最大跌幅：1.2 → 0.8 = -33%
+        assert compute_max_drawdown(equity) == pytest.approx(-1.0 / 3, abs=0.01)
+
+    def test_t23_sharpe(self):
+        rng = np.random.default_rng(2)
+        daily = pd.Series(0.001 + 0.01 * rng.standard_normal(252))
+        sharpe = compute_sharpe(daily)
+        # mean ≈ 0.001, std ≈ 0.01 → annualized sharpe ≈ 0.001/0.01 × √252 ≈ 1.59
+        assert sharpe == pytest.approx(1.59, abs=0.5)
+
+
+class TestT24VerdictChurning:
+    """T24. CHURNING 分支触发."""
+
+    def test_t24_ic_pass_but_excess_below_3pct(self):
+        m = _baseline_metrics(excess_return_bm1=0.025)
+        v, notes = render_verdict(m)
+        assert v is Verdict.CHURNING
+        assert notes["reason"] == "ic_pass_but_cost_eats_alpha"
+
+    def test_t24_red_line_constant(self):
+        assert CHURNING_RED_LINE == 0.03
+
+
+class TestT25VerdictSizeBetaOnly:
+    """T25. SIZE-BETA-ONLY 分支触发 ⭐."""
+
+    def test_t25_bm1_pass_bm2_negative(self):
+        m = _baseline_metrics(excess_return_bm1=0.07, excess_return_bm2=-0.01)
+        v, notes = render_verdict(m)
+        assert v is Verdict.SIZE_BETA_ONLY
+
+    def test_t25_bm2_zero_triggers_size_beta(self):
+        """vs BM2 = 0 → 也算 SIZE-BETA-ONLY（≤ 0 触发）."""
+        m = _baseline_metrics(excess_return_bm1=0.07, excess_return_bm2=0.0)
+        v, _ = render_verdict(m)
+        assert v is Verdict.SIZE_BETA_ONLY
+
+
+class TestT26VerdictNoAlpha:
+    """T26. NO-ALPHA 分支触发."""
+
+    def test_t26_ic_mean_below_threshold(self):
+        m = _baseline_metrics(ic_a=ICStats(mean=0.015, std=0.10, t_stat=4.0, n=260))
+        v, notes = render_verdict(m)
+        assert v is Verdict.NO_ALPHA
+        assert notes["reason"] == "ic_a_failed"
+
+    def test_t26_tstat_below_threshold(self):
+        m = _baseline_metrics(ic_a=ICStats(mean=0.025, std=0.10, t_stat=2.5, n=260))
+        v, _ = render_verdict(m)
+        assert v is Verdict.NO_ALPHA
+
+    def test_t26_threshold_constants(self):
+        assert IC_MEAN_THRESHOLD == 0.02
+        assert IC_TSTAT_THRESHOLD == 3.0
+
+
+class TestT27VerdictPassPrelim:
+    """T27. PASS-prelim 分支触发."""
+
+    def test_t27_all_thresholds_pass(self):
+        m = _baseline_metrics()  # 默认 fixture 全过门槛
+        v, notes = render_verdict(m)
+        assert v is Verdict.PASS_PRELIM
+        assert notes["reason"] == "all_thresholds_pass"
+
+
+class TestT28VerdictUnstable:
+    """T28. UNSTABLE 检测."""
+
+    def test_t28_consecutive_3m_loss_triggers_unstable(self):
+        """3 连月 vs BM2 累计 -12% → UNSTABLE."""
+        m = _baseline_metrics()
+        monthly_excess = pd.Series([0.01, 0.02, -0.05, -0.05, -0.05, 0.01])  # 中间 3 月 -15%
+        v, _ = render_verdict(m, monthly_excess_vs_bm2=monthly_excess)
+        assert v is Verdict.UNSTABLE
+
+    def test_t28_no_consecutive_loss_no_trigger(self):
+        m = _baseline_metrics()
+        monthly_excess = pd.Series([0.01, -0.03, 0.02, -0.03, 0.02, 0.01])
+        v, _ = render_verdict(m, monthly_excess_vs_bm2=monthly_excess)
+        assert v is Verdict.PASS_PRELIM
+
+    def test_t28_detect_unstable_window_function(self):
+        s = pd.Series([0.01, -0.04, -0.05, -0.05])  # 后 3 个累计 -14%
+        assert detect_unstable_window(s) is True
+        s2 = pd.Series([-0.04, 0.05, -0.04, 0.05])  # 任何 3 连无 < -10%
+        assert detect_unstable_window(s2) is False
+
+
+class TestT29DualSignalCrossCheck:
+    """T29. 双信号交叉验证 ⭐ (§3.5)."""
+
+    def _ic(self, mean: float, t_stat: float) -> ICStats:
+        return ICStats(mean=mean, std=0.10, t_stat=t_stat, n=260)
+
+    def test_t29_dual_pass_high_overlap(self):
+        status = classify_dual_signal(
+            self._ic(0.03, 4.0),
+            self._ic(0.025, 3.5),
+            overlap=0.65,
+        )
+        assert status is DualSignalStatus.DUAL_CONFIRMED
+
+    def test_t29_a_pass_b_fail(self):
+        status = classify_dual_signal(
+            self._ic(0.03, 4.0),
+            self._ic(0.01, 2.0),
+            overlap=0.5,
+        )
+        assert status is DualSignalStatus.ALPHA_MAY_BE_BETA_DRIVEN
+
+    def test_t29_a_fail_b_pass(self):
+        status = classify_dual_signal(
+            self._ic(0.01, 2.0),
+            self._ic(0.03, 4.0),
+            overlap=0.5,
+        )
+        assert status is DualSignalStatus.SWITCH_PRIMARY_SIGNAL
+
+    def test_t29_dual_fail(self):
+        status = classify_dual_signal(
+            self._ic(0.01, 2.0),
+            self._ic(0.005, 1.5),
+            overlap=0.3,
+        )
+        assert status is DualSignalStatus.NO_ALPHA
+
+    def test_t29_dual_pass_low_overlap_warns(self):
+        """双 PASS 但重合度 < 60% → 保守标 may_be_beta_driven."""
+        status = classify_dual_signal(
+            self._ic(0.03, 4.0),
+            self._ic(0.03, 4.0),
+            overlap=0.40,
+        )
+        assert status is DualSignalStatus.ALPHA_MAY_BE_BETA_DRIVEN
