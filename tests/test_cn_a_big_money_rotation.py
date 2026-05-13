@@ -18,6 +18,15 @@ from strategies.cn_a_big_money_rotation.data import (
     compute_money_flow_factors,
     recover_float_share,
 )
+from strategies.cn_a_big_money_rotation.universe import (
+    LIQUIDITY_FLOOR_RMB,
+    MIN_LISTING_DAYS,
+    daily_universe,
+    is_st_name,
+    is_suspended,
+    passes_liquidity,
+    passes_listing_age,
+)
 
 
 def test_smoke_package_importable():
@@ -236,3 +245,163 @@ class TestT4MoneyFlowMissing:
         assert len(out) == 0
         for col in ("big_net_inflow", "total_amount", "big_net_ratio"):
             assert col in out.columns
+
+
+# ============================================================================
+# M2 Universe 层（T5-T8）
+# ============================================================================
+
+from datetime import date, timedelta  # noqa: E402  (位置故意：分节边界)
+
+
+class TestT5STPrefixFilter:
+    """T5. ST/*ST/退 前缀过滤 (§4 步骤 2)."""
+
+    @pytest.mark.parametrize("name,expected", [
+        ("平安银行", False),       # 正常股
+        ("ST 康美", True),         # ST
+        ("*ST 海航", True),        # *ST
+        ("退市某某", True),        # 退
+        ("  ST 北农", True),       # 前导空白
+        ("STAR", True),            # 大写 ST 开头（已知误伤；caller 责）
+        ("", False),               # 空字符串
+        (None, False),             # NULL
+    ])
+    def test_t5_st_prefix(self, name, expected):
+        assert is_st_name(name) is expected
+
+
+class TestT6ListingAgeFilter:
+    """T6. 次新过滤：上市 < 250 日剔除 (§4 步骤 3)."""
+
+    def test_t6_249_days_rejected(self):
+        as_of = date(2026, 5, 11)
+        listed = as_of - timedelta(days=249)
+        assert not passes_listing_age(listed, as_of)
+
+    def test_t6_250_days_accepted(self):
+        as_of = date(2026, 5, 11)
+        listed = as_of - timedelta(days=250)
+        assert passes_listing_age(listed, as_of)
+
+    def test_t6_null_listing_date_rejected(self):
+        """上市日 NULL → 保守剔除."""
+        assert not passes_listing_age(None, date(2026, 5, 11))
+
+    def test_t6_uses_min_days_default(self):
+        assert MIN_LISTING_DAYS == 250
+
+
+class TestT7SuspensionFilter:
+    """T7. 停牌过滤 (§4 步骤 4)."""
+
+    def test_t7_zero_amount_suspended(self):
+        assert is_suspended("000001", {"000001": 0.0}, {"000001"}) is True
+
+    def test_t7_negative_amount_suspended(self):
+        """成交额 NaN → 停牌."""
+        assert is_suspended("000001", {"000001": float("nan")}, {"000001"}) is True
+
+    def test_t7_missing_kline_row_suspended(self):
+        assert is_suspended("000001", {}, {"000001"}) is True
+
+    def test_t7_missing_money_flow_row_suspended(self):
+        """kline 有但 money_flow 没有 → 剔除."""
+        assert is_suspended("000001", {"000001": 1e8}, set()) is True
+
+    def test_t7_normal_day_not_suspended(self):
+        assert is_suspended("000001", {"000001": 1e8}, {"000001"}) is False
+
+
+class TestT8LiquidityFloor:
+    """T8. 流动性下限 ⭐ (§4 步骤 5)."""
+
+    def test_t8_mean_4999w_rejected(self):
+        """20 日均 = 4999 万 → 剔除（均值 < 5000 万）."""
+        amts = pd.Series([4999e4] * 20)
+        assert not passes_liquidity(amts)
+
+    def test_t8_mean_5000w_accepted(self):
+        """20 日均 = 5000 万 → 保留（边界等于条件）."""
+        amts = pd.Series([5000e4] * 20)
+        assert passes_liquidity(amts)
+
+    def test_t8_same_day_below_mean_above_rejected(self):
+        """当日 4000 万 + 20 日均 8000 万 → 剔除（双条件 AND，当日不足）."""
+        amts = pd.Series([8000e4] * 19 + [4000e4])
+        assert not passes_liquidity(amts)
+
+    def test_t8_partial_window_above_floor_accepted(self):
+        """不足 20 日：仅 100 日内的 5 日窗口，均 6000 万 → 保留（用现有窗口均值）."""
+        amts = pd.Series([6000e4] * 5)
+        assert passes_liquidity(amts)
+
+    def test_t8_empty_series_rejected(self):
+        assert not passes_liquidity(pd.Series(dtype=float))
+
+    def test_t8_uses_default_floor(self):
+        assert LIQUIDITY_FLOOR_RMB == 5e7
+
+
+class TestDailyUniverseComposite:
+    """组合测试：daily_universe 5 步联合（覆盖 T5-T8 综合）."""
+
+    def _make_input(self):
+        as_of = date(2026, 5, 11)
+        sec_list = pd.DataFrame({
+            "stock_code": ["000001", "ST0002", "300003", "600004", "688005"],
+            "stock_name": ["平安银行", "ST 风险", "新股", "退市股", "正常 5"],
+        })
+        # 000001 上市 5 年；ST0002 上市 5 年但 ST；300003 上市 100 日；
+        # 600004 上市 5 年但名称含"退"；688005 上市 5 年。
+        old = as_of - timedelta(days=2000)
+        new = as_of - timedelta(days=100)
+        listing_dates = {
+            "000001": old,
+            "ST0002": old,
+            "300003": new,
+            "600004": old,
+            "688005": old,
+        }
+        kline_today_amount = {
+            "000001": 1e9,    # 10 亿
+            "ST0002": 1e9,
+            "300003": 1e9,
+            "600004": 1e9,
+            "688005": 1e9,
+        }
+        money_flow_today_codes = {"000001", "ST0002", "300003", "600004", "688005"}
+        amount_history = {
+            c: pd.Series([1e9] * 20)
+            for c in ["000001", "ST0002", "300003", "600004", "688005"]
+        }
+        return (as_of, sec_list, listing_dates, kline_today_amount,
+                money_flow_today_codes, amount_history)
+
+    def test_daily_universe_filters_st_new_delisted(self):
+        """只有 000001 和 688005 应通过（ST0002 ST 剔；300003 次新剔；600004 退 剔）."""
+        args = self._make_input()
+        universe = daily_universe(*args)
+        assert universe == {"000001", "688005"}
+
+    def test_daily_universe_suspension_excluded(self):
+        """000001 当日停牌（amount=0）→ 被剔除."""
+        as_of, sec, listing, kline, mf, hist = self._make_input()
+        kline = {**kline, "000001": 0.0}
+        universe = daily_universe(as_of, sec, listing, kline, mf, hist)
+        assert "000001" not in universe
+        assert universe == {"688005"}
+
+    def test_daily_universe_money_flow_missing_excluded(self):
+        """000001 当日缺 money_flow 行 → 被剔除."""
+        as_of, sec, listing, kline, mf, hist = self._make_input()
+        mf = mf - {"000001"}
+        universe = daily_universe(as_of, sec, listing, kline, mf, hist)
+        assert "000001" not in universe
+
+    def test_daily_universe_low_liquidity_excluded(self):
+        """000001 20 日均 4000 万 → 剔除."""
+        as_of, sec, listing, kline, mf, hist = self._make_input()
+        hist = {**hist, "000001": pd.Series([4000e4] * 20)}
+        universe = daily_universe(as_of, sec, listing, kline, mf, hist)
+        assert "000001" not in universe
