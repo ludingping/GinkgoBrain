@@ -1,0 +1,40 @@
+{
+  "verdict": "NO-ALPHA",
+  "verdict_notes": {
+    "ic_a_pass": false,
+    "reason": "ic_a_failed"
+  },
+  "extra_notes": {
+    "bm1_unavailable": true,
+    "dual_signal_status": "no_alpha",
+    "n_trade_dates": 267,
+    "final_equity": 10511712.781634836,
+    "cumulative_return": 0.05117127816348366,
+    "n_ic_observations": 263
+  },
+  "metrics": {
+    "ic_a": {
+      "mean": 0.0017054432534177163,
+      "std": 0.12283687731821803,
+      "t_stat": 0.2251574803785696,
+      "n": 263
+    },
+    "ic_b": {
+      "mean": -0.0034183175645168644,
+      "std": 0.12209344011064041,
+      "t_stat": -0.4540440095952536,
+      "n": 263
+    },
+    "cumulative_return": 0.05117127816348366,
+    "annualized_return": 0.04841391410423368,
+    "excess_return_bm1": 0.04841391410423368,
+    "excess_return_bm2": -0.40581549680206375,
+    "ir_bm1": NaN,
+    "ir_bm2": -1.6023283569798674,
+    "max_drawdown": -0.20422446057395763,
+    "max_relative_dd_bm1": NaN,
+    "monthly_turnover": 0.3,
+    "sharpe": 0.31414709430460575,
+    "overlap_ab": 0.1356888845628107
+  }
+}

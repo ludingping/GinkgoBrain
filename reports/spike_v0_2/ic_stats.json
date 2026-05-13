@@ -1,0 +1,17 @@
+{
+  "ic_mean": -0.012542477789777209,
+  "ic_std": 0.07875325003253843,
+  "ic_tstat": -2.462146019819647,
+  "ic_n": 239,
+  "params": {
+    "N_window": 10,
+    "positive_days_min": 7,
+    "price_range": [
+      -0.05,
+      0.08
+    ],
+    "top_n": 20,
+    "forward_ic_horizon": 4
+  },
+  "pass_thresholds": false
+}
