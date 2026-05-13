@@ -27,6 +27,13 @@ from strategies.cn_a_big_money_rotation.universe import (
     passes_liquidity,
     passes_listing_age,
 )
+from strategies.cn_a_big_money_rotation.signal import (
+    TARGET_TOP_N,
+    compute_signals,
+    dual_signal_overlap,
+    rank_cross_section,
+    select_top_n,
+)
 
 
 def test_smoke_package_importable():
@@ -405,3 +412,162 @@ class TestDailyUniverseComposite:
         hist = {**hist, "000001": pd.Series([4000e4] * 20)}
         universe = daily_universe(as_of, sec, listing, kline, mf, hist)
         assert "000001" not in universe
+
+
+# ============================================================================
+# M3 信号层（T9-T12）
+# ============================================================================
+
+
+class TestT9CrossSectionRankDeterministic:
+    """T9. 截面排序确定性."""
+
+    def test_t9_same_input_same_output(self):
+        scores = pd.Series([0.5, 0.3, 0.8, 0.1])
+        codes = pd.Series(["000001", "300003", "600004", "688005"])
+        r1 = rank_cross_section(scores, codes)
+        r2 = rank_cross_section(scores, codes)
+        pd.testing.assert_series_equal(r1, r2)
+
+    def test_t9_descending_order(self):
+        """大者 rank=1（默认 ascending=False）."""
+        scores = pd.Series([0.5, 0.3, 0.8, 0.1])
+        codes = pd.Series(["A", "B", "C", "D"])
+        rank = rank_cross_section(scores, codes)
+        # 0.8(C)=1, 0.5(A)=2, 0.3(B)=3, 0.1(D)=4
+        assert list(rank) == [2, 3, 1, 4]
+
+    def test_t9_nan_score_to_tail(self):
+        """NaN score → rank 排到末尾."""
+        scores = pd.Series([0.5, np.nan, 0.8, np.nan])
+        codes = pd.Series(["A", "B", "C", "D"])
+        rank = rank_cross_section(scores, codes)
+        # 0.8(C)=1, 0.5(A)=2, B/D 排末尾（在 valid 中 mergesort 稳定，code "B" < "D" 先到）
+        # 实现里 NaN 块按原 position 顺序，所以 B=3, D=4
+        assert rank.iloc[2] == 1  # C
+        assert rank.iloc[0] == 2  # A
+        assert rank.iloc[1] in (3, 4)  # B
+        assert rank.iloc[3] in (3, 4)  # D
+        assert rank.iloc[1] != rank.iloc[3]
+
+
+class TestT10TieBreakByStockCode:
+    """T10. Score 相同时按 stock_code 字典序升序 tie-break ⭐."""
+
+    def test_t10_three_tied_scores(self):
+        """三只股 score 完全相同 → 字典序升序排."""
+        scores = pd.Series([0.5, 0.5, 0.5])
+        codes = pd.Series(["600000", "000001", "300001"])
+        rank = rank_cross_section(scores, codes)
+        # 字典序：000001 < 300001 < 600000 → rank 1, 2, 3
+        # 但输入顺序是 [600000, 000001, 300001] → rank 应是 [3, 1, 2]
+        assert list(rank) == [3, 1, 2]
+
+    def test_t10_input_order_irrelevant(self):
+        """不同 input 顺序，相同 score → 输出还原到原 position 后 rank 一致."""
+        scores_a = pd.Series([0.5, 0.5, 0.5])
+        codes_a = pd.Series(["600000", "000001", "300001"])
+        # 倒序输入
+        scores_b = pd.Series([0.5, 0.5, 0.5])
+        codes_b = pd.Series(["300001", "000001", "600000"])
+
+        rank_a = rank_cross_section(scores_a, codes_a)
+        rank_b = rank_cross_section(scores_b, codes_b)
+
+        # rank_a 中 600000 的 rank = 3
+        # rank_b 中 600000 的 rank = 3（不论它出现在哪个 position）
+        assert rank_a[codes_a == "600000"].iloc[0] == 3
+        assert rank_b[codes_b == "600000"].iloc[0] == 3
+        assert rank_a[codes_a == "000001"].iloc[0] == 1
+        assert rank_b[codes_b == "000001"].iloc[0] == 1
+
+
+class TestT11Top20Selection:
+    """T11. Top20 唯一性 & 短样本退化."""
+
+    def _make_signal_df(self, n_stocks: int, *, valid_n: int | None = None):
+        """造 n_stocks 行 signal DataFrame，前 valid_n 个有效 score（valid_n=None 表全部有效）."""
+        if valid_n is None:
+            valid_n = n_stocks
+        codes = [f"S{i:04d}" for i in range(n_stocks)]
+        scores = [0.01 * (n_stocks - i) for i in range(n_stocks)]  # 降序，全 unique
+        for i in range(valid_n, n_stocks):
+            scores[i] = np.nan
+        df = pd.DataFrame({
+            "stock_code": codes,
+            "score_A": scores,
+        })
+        df["rank_A"] = rank_cross_section(df["score_A"], df["stock_code"])
+        return df
+
+    def test_t11_universe_3500_exactly_20(self):
+        df = self._make_signal_df(3500)
+        sel = select_top_n(df, n=20)
+        assert len(sel) == 20
+
+    def test_t11_universe_15_returns_all(self):
+        df = self._make_signal_df(15)
+        sel = select_top_n(df, n=20)
+        assert len(sel) == 15
+
+    def test_t11_universe_20_exact(self):
+        df = self._make_signal_df(20)
+        sel = select_top_n(df, n=20)
+        assert len(sel) == 20
+
+    def test_t11_nan_scores_excluded(self):
+        """30 只候选，仅前 10 有效 score → Top20 实际只返回 10."""
+        df = self._make_signal_df(30, valid_n=10)
+        sel = select_top_n(df, n=20)
+        assert len(sel) == 10
+        assert sel["score_A"].notna().all()
+
+
+class TestT12DualSignalOutput:
+    """T12. 双信号同步输出 ⭐ (§3.5)."""
+
+    def _make_factor_df(self):
+        return pd.DataFrame({
+            "stock_code": ["000001", "300003", "600004"],
+            "big_net_inflow": [1.7e7, 5e6, 3e7],
+            "total_amount": [4.3e7, 2e7, 1e8],
+            "float_mv": [1e9, 8e8, 5e9],
+        })
+
+    def test_t12_outputs_all_four_columns(self):
+        df = self._make_factor_df()
+        out = compute_signals(df)
+        for col in ("score_A", "rank_A", "score_B", "rank_B"):
+            assert col in out.columns
+
+    def test_t12_score_A_main_signal(self):
+        """score_A = big_net_inflow / float_mv."""
+        df = self._make_factor_df()
+        out = compute_signals(df)
+        assert out["score_A"].iloc[0] == pytest.approx(1.7e7 / 1e9)
+        assert out["score_A"].iloc[2] == pytest.approx(3e7 / 5e9)
+
+    def test_t12_score_B_diagnostic_signal(self):
+        """score_B = big_net_inflow / total_amount."""
+        df = self._make_factor_df()
+        out = compute_signals(df)
+        assert out["score_B"].iloc[0] == pytest.approx(1.7e7 / 4.3e7)
+
+    def test_t12_select_top_uses_rank_A_only(self):
+        """select_top_n 默认按 rank_A 截取，不查 rank_B."""
+        df = self._make_factor_df()
+        out = compute_signals(df)
+        sel = select_top_n(out, n=2)
+        # 按 score_A: 000001=0.017, 300003=0.00625, 600004=0.006
+        # 按 score_B: 000001=0.395, 300003=0.25, 600004=0.30
+        # Top2 by rank_A → 000001, 300003
+        assert set(sel["stock_code"]) == {"000001", "300003"}
+
+    def test_t12_dual_signal_overlap_jaccard(self):
+        assert dual_signal_overlap(["A", "B", "C"], ["B", "C", "D"]) == pytest.approx(2 / 4)
+        assert dual_signal_overlap(["A"], ["A"]) == 1.0
+        assert dual_signal_overlap([], []) == 0.0
+        assert dual_signal_overlap(["A"], ["B"]) == 0.0
+
+    def test_t12_target_top_n_default_20(self):
+        assert TARGET_TOP_N == 20
