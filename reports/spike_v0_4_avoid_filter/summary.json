@@ -1,0 +1,35 @@
+{
+  "params": {
+    "excl_top_pct": 0.1,
+    "excl_bot_pct": 0.05,
+    "d_rolling": 10,
+    "daily_friction": 0.0001,
+    "data": "MongoDB treasure.stock_fund_flow >=2022, coverage >=500d"
+  },
+  "portfolios": {
+    "BM2 (full universe)": {
+      "cum_pct": 23.81,
+      "ann_pct": 8.42,
+      "sharpe": 0.43,
+      "max_dd_pct": -36.64
+    },
+    "Excl Top d10 10%": {
+      "cum_pct": -13.58,
+      "ann_pct": -5.37,
+      "sharpe": -0.07,
+      "max_dd_pct": -45.24
+    },
+    "Excl Bot d1 5%": {
+      "cum_pct": 103.79,
+      "ann_pct": 30.92,
+      "sharpe": 1.13,
+      "max_dd_pct": -30.67
+    },
+    "Excl Both (避雷双过滤)": {
+      "cum_pct": 43.31,
+      "ann_pct": 14.58,
+      "sharpe": 0.64,
+      "max_dd_pct": -33.24
+    }
+  }
+}
