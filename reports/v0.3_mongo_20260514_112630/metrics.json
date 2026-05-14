@@ -1,0 +1,59 @@
+{
+  "verdict": "NO-ALPHA-vs-BM2 (跑输等权全市场)",
+  "params": {
+    "data_source": "MongoDB treasure.stock_fund_flow",
+    "effective_start": "2022-01-01",
+    "min_coverage_days": 500,
+    "signal": "v0.2 (持续吸筹 + 价格温和 [-5%, +8%])",
+    "撮合简化": "用 close 当 T+1 开盘价；跳过涨跌停 + 容量截断"
+  },
+  "metrics": {
+    "cumulative_return": -0.024402591292521203,
+    "annualized_return": -0.009304383364341473,
+    "bm2_cum": 0.256488973184237,
+    "bm2_annualized": 0.09023344611200534,
+    "excess_return_bm2": -0.09953782947634682,
+    "sharpe": 0.11648943784011856,
+    "ir_bm2": -0.21932656178329016,
+    "max_drawdown": -0.4028622230401503,
+    "n_trade_dates": 667
+  },
+  "yearly": [
+    {
+      "year": 2022,
+      "cum_pct": -7.53,
+      "bm2_pct": -5.82,
+      "excess_pct": -1.7,
+      "sharpe": -2.46,
+      "max_dd_pct": -9.49,
+      "n_days": 34
+    },
+    {
+      "year": 2023,
+      "cum_pct": -10.07,
+      "bm2_pct": 0.65,
+      "excess_pct": -10.72,
+      "sharpe": -0.68,
+      "max_dd_pct": -21.91,
+      "n_days": 238
+    },
+    {
+      "year": 2024,
+      "cum_pct": 2.97,
+      "bm2_pct": 2.55,
+      "excess_pct": 0.42,
+      "sharpe": 0.29,
+      "max_dd_pct": -29.58,
+      "n_days": 238
+    },
+    {
+      "year": 2025,
+      "cum_pct": 12.82,
+      "bm2_pct": 29.69,
+      "excess_pct": -16.87,
+      "sharpe": 1.24,
+      "max_dd_pct": -8.56,
+      "n_days": 157
+    }
+  ]
+}
