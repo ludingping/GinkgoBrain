@@ -386,3 +386,41 @@ def load_mongo_money_flow_panel(
         panel[k] = panel[k].loc[valid_dates]
     logger.info("Final panel: %d dates, %d stocks", len(panel["price"]), panel["price"].shape[1])
     return panel
+
+
+def load_cnstock_kline_panel(
+    start: str,
+    end: str,
+    stocks: Iterable[str] | None = None,
+) -> dict[str, pd.DataFrame]:
+    """读 cnstock_kline_day 范围内 OHLC + volume + amount, 返回 pivoted panels.
+
+    用于 v0.8 production realistic backtest 的执行端约束 (精确 limit_up / liquidity / capacity).
+    stock_code 6 位无前缀, 与 mongo stock_id 直接对齐.
+
+    Args:
+        start: 起始日期 (含)
+        end: 终止日期 (含)
+        stocks: 限定股票列表 (None 表示全部)
+
+    Returns:
+        dict with 6 DataFrames (open/high/low/close/volume/amount), index=trade_date, columns=stock_code.
+    """
+    df = load_kline_close_range(start, end, stocks)
+    if df.empty:
+        raise RuntimeError(f"cnstock_kline_day query returned 0 rows for [{start}, {end}]")
+    logger.info("Loaded cnstock_kline_day: %d rows, %d stocks, %d dates",
+                len(df), df["stock_code"].nunique(), df["trade_date"].nunique())
+
+    def piv(field):
+        return df.pivot_table(index="trade_date", columns="stock_code",
+                              values=field, aggfunc="first")
+
+    return {
+        "open": piv("open_price"),
+        "high": piv("high_price"),
+        "low": piv("low_price"),
+        "close": piv("close_price"),
+        "volume": piv("volume"),
+        "amount": piv("amount"),
+    }

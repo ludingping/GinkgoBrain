@@ -1,0 +1,101 @@
+{
+  "mode": "scope_b",
+  "predictions_in_sample": false,
+  "first_date": "2024-01-02",
+  "last_date": "2025-10-09",
+  "n_pred_dates": 390,
+  "with_kline": true,
+  "folds": [
+    [
+      "F1",
+      "2022-04-01",
+      "2023-12-31",
+      "2024-01-01",
+      "2024-12-31"
+    ],
+    [
+      "F2",
+      "2022-04-01",
+      "2024-12-31",
+      "2025-01-01",
+      "2025-12-31"
+    ]
+  ],
+  "rows": [
+    {
+      "portfolio": "Simplified (no limit, no lock)",
+      "n_days": 390,
+      "first_date": "2024-01-02",
+      "last_date": "2025-10-09",
+      "cum_pct": 34.74,
+      "ann_pct": 21.31,
+      "sharpe": 0.76,
+      "max_dd_pct": -29.82,
+      "avg_turn_pct": 5.35,
+      "bm2_cum_pct": 29.54,
+      "bm2_ann_pct": 18.25,
+      "excess_pct": 5.2,
+      "excess_ann_pct": 3.05
+    },
+    {
+      "portfolio": "Realistic mongo-only (|qc| approx + lock 3d) @ f=0.0001",
+      "n_days": 390,
+      "first_date": "2024-01-02",
+      "last_date": "2025-10-09",
+      "cum_pct": 32.33,
+      "ann_pct": 19.9,
+      "sharpe": 0.72,
+      "max_dd_pct": -29.83,
+      "avg_turn_pct": 0.87,
+      "bm2_cum_pct": 29.54,
+      "bm2_ann_pct": 18.25,
+      "excess_pct": 2.79,
+      "excess_ann_pct": 1.64
+    },
+    {
+      "portfolio": "Fully realistic (precise limit_up, no liq filter) @ f=0.0001",
+      "n_days": 390,
+      "first_date": "2024-01-02",
+      "last_date": "2025-10-09",
+      "cum_pct": 32.5,
+      "ann_pct": 20.0,
+      "sharpe": 0.72,
+      "max_dd_pct": -29.84,
+      "avg_turn_pct": 0.81,
+      "bm2_cum_pct": 29.54,
+      "bm2_ann_pct": 18.25,
+      "excess_pct": 2.96,
+      "excess_ann_pct": 1.74
+    },
+    {
+      "portfolio": "Fully realistic (precise limit_up + liq>=1000w) @ f=0.0001",
+      "n_days": 390,
+      "first_date": "2024-01-02",
+      "last_date": "2025-10-09",
+      "cum_pct": 33.29,
+      "ann_pct": 20.46,
+      "sharpe": 0.73,
+      "max_dd_pct": -29.83,
+      "avg_turn_pct": 0.9,
+      "bm2_cum_pct": 30.28,
+      "bm2_ann_pct": 18.69,
+      "excess_pct": 3.0,
+      "excess_ann_pct": 1.77
+    },
+    {
+      "portfolio": "Fully realistic (precise limit_up + liq>=5000w) @ f=0.0001",
+      "n_days": 390,
+      "first_date": "2024-01-02",
+      "last_date": "2025-10-09",
+      "cum_pct": 26.33,
+      "ann_pct": 16.35,
+      "sharpe": 0.62,
+      "max_dd_pct": -28.06,
+      "avg_turn_pct": 2.38,
+      "bm2_cum_pct": 22.36,
+      "bm2_ann_pct": 13.96,
+      "excess_pct": 3.98,
+      "excess_ann_pct": 2.39
+    }
+  ]
+}

@@ -33,9 +33,12 @@ class V0_8_BacktestConfig:
     top_n: int | None = None               # 若 ≥0 则选 Top n 模式 (优先 bot_pct)
     friction: float = 0.0001               # 日度 friction (单边)
     holding_min_days: int = 3              # 买入后锁定天数
-    limit_up_thr: float = 9.95             # |quote_change| ≥ 此值视为一字涨跌停
+    limit_up_thr: float = 9.95             # |quote_change| ≥ 此值视为一字涨跌停 (approx, mongo only)
     apply_limit_up_filter: bool = True
     apply_holding_lock: bool = True
+    # 以下需 cnstock kline_panel 才生效:
+    apply_precise_limit_up: bool = False   # True 时用 (open==high==low) 替换 |qc| approx (需 kline)
+    min_avg_amount_20d: float = 0.0        # liquidity filter; >0 时排除 amount_20d < 此值的 stock (需 kline)
 
 
 @dataclass
@@ -77,8 +80,19 @@ def simulate_v0_8(
     pred_pivot: pd.DataFrame,
     panel: dict,
     cfg: V0_8_BacktestConfig,
+    kline_panel: dict | None = None,
 ) -> V0_8_BacktestResult:
-    """Vectorized realistic backtest with v0.8 GBDT predictions."""
+    """Vectorized realistic backtest with v0.8 GBDT predictions.
+
+    Args:
+        pred_pivot: GBDT 预测 rank, index=date, cols=stock_id, values=pred
+        panel: mongo panel from load_mongo_money_flow_panel
+        cfg: 配置
+        kline_panel: 可选 cnstock kline panel from load_cnstock_kline_panel
+                     (含 open/high/low/close/amount), 用于:
+                     - 精确 limit_up (open==high==low) 替换 |qc| approx
+                     - liquidity filter (avg_amount_20d 下限)
+    """
     price = panel["price"]
     qc = panel["quote_change"]
 
@@ -86,11 +100,32 @@ def simulate_v0_8(
     universe_mask = price.notna() & (price > 0)
     daily_ret = price.pct_change()
 
+    # liquidity filter (need kline)
+    if kline_panel is not None and cfg.min_avg_amount_20d > 0:
+        amount = kline_panel["amount"].reindex(index=price.index, columns=price.columns)
+        avg_amount_20d = amount.rolling(20, min_periods=10).mean()
+        liquid_mask = avg_amount_20d >= cfg.min_avg_amount_20d
+        universe_mask = universe_mask & liquid_mask.fillna(False)
+        logger.info("Liquidity filter active: avg_amount_20d >= %.0f yuan", cfg.min_avg_amount_20d)
+
     target_mask_t = _build_target_mask(pred_pivot, universe_mask, cfg.bot_pct, cfg.top_n)
     intended_t1 = target_mask_t.shift(1).fillna(False).astype(bool)
 
     if cfg.apply_limit_up_filter:
+        # 默认: |quote_change| ≥ thr approx
         limit_at_t1 = qc.abs().ge(cfg.limit_up_thr).fillna(False)
+        # 升级: 用 cnstock kline (open==high==low) AND qc>=thr 精确一字涨跌停
+        if kline_panel is not None and cfg.apply_precise_limit_up:
+            opn = kline_panel["open"].reindex(index=price.index, columns=price.columns)
+            high = kline_panel["high"].reindex(index=price.index, columns=price.columns)
+            low = kline_panel["low"].reindex(index=price.index, columns=price.columns)
+            # 一字: open == high == low; qc 用 mongo 的 (兼容)
+            eps = (opn.abs().clip(lower=1.0) * 1e-6).fillna(1.0)
+            is_one_word = (((opn - high).abs() <= eps) &
+                            ((high - low).abs() <= eps) &
+                            (qc.abs() >= cfg.limit_up_thr)).fillna(False)
+            limit_at_t1 = is_one_word
+            logger.info("Precise limit_up active: (open==high==low) AND |qc|>=%.2f", cfg.limit_up_thr)
         prev_intended = intended_t1.shift(1).fillna(False)
         is_new_entry = intended_t1 & ~prev_intended
         blocked = is_new_entry & limit_at_t1
