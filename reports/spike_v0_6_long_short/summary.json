@@ -1,0 +1,71 @@
+{
+  "params": {
+    "top_pct": 0.05,
+    "bot_pct": 0.05,
+    "friction": 0.0001,
+    "oos_start": "2024-01-02",
+    "oos_end": "2025-10-09"
+  },
+  "portfolios": [
+    {
+      "portfolio": "BM2 (univ 等权)",
+      "cum_pct": 29.54,
+      "ann_pct": 18.25,
+      "sharpe": 0.67,
+      "max_dd_pct": -29.99,
+      "avg_turn_pct": 0.0,
+      "exposure_net": 1.0,
+      "exposure_gross": 1.0
+    },
+    {
+      "portfolio": "Long Top 5% (only)",
+      "cum_pct": 34.14,
+      "ann_pct": 20.96,
+      "sharpe": 0.75,
+      "max_dd_pct": -40.15,
+      "avg_turn_pct": 112.44,
+      "exposure_net": 1.0,
+      "exposure_gross": 1.0
+    },
+    {
+      "portfolio": "Avoid Bot 5% (v0.8)",
+      "cum_pct": 34.74,
+      "ann_pct": 21.31,
+      "sharpe": 0.76,
+      "max_dd_pct": -29.82,
+      "avg_turn_pct": 5.35,
+      "exposure_net": 1.0,
+      "exposure_gross": 1.0
+    },
+    {
+      "portfolio": "L-S 理想 (long Top - short Bot, 50/50)",
+      "cum_pct": 39.69,
+      "ann_pct": 24.17,
+      "sharpe": 1.59,
+      "max_dd_pct": -11.67,
+      "avg_turn_pct": 105.95,
+      "exposure_net": 0.0,
+      "exposure_gross": 1.0
+    },
+    {
+      "portfolio": "L-S 可执行 (long Top 100% - short BM2 100%)",
+      "cum_pct": -2.2,
+      "ann_pct": -1.43,
+      "sharpe": -0.04,
+      "max_dd_pct": -17.96,
+      "avg_turn_pct": 112.44,
+      "exposure_net": 0.0,
+      "exposure_gross": 2.0
+    }
+  ],
+  "alpha_decomp": {
+    "long_end_pct": 2.7021075857705634,
+    "short_end_pct": 47.573806091699645,
+    "ls_ideal_50_50_pct": 24.173889612827494,
+    "ls_exec_vs_bm2_pct": -1.4318458291353142
+  },
+  "gate": {
+    "ls_exec_gt_4pct": false,
+    "ls_exec_pct": -1.4318458291353142
+  }
+}
