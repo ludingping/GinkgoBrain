@@ -1,0 +1,74 @@
+{
+  "params": {
+    "excl_bot_pct": 0.05,
+    "friction": 0.0001
+  },
+  "bm2": {
+    "cum_pct": 23.963643297448844,
+    "ann_pct": 8.467731635732667,
+    "sharpe": 0.4358609575304421
+  },
+  "portfolios": [
+    {
+      "portfolio": "A: main_vs_retail_d1 (base only)",
+      "cum_pct": 29.51,
+      "ann_pct": 10.28,
+      "sharpe": 0.5,
+      "max_dd_pct": -36.29,
+      "avg_turn_pct": 9.19,
+      "excess_pct": 5.54
+    },
+    {
+      "portfolio": "B: -20d_momentum (cand only)",
+      "cum_pct": 32.45,
+      "ann_pct": 11.22,
+      "sharpe": 0.53,
+      "max_dd_pct": -35.51,
+      "avg_turn_pct": 2.44,
+      "excess_pct": 8.49
+    },
+    {
+      "portfolio": "C: base + -20d_momentum (rank-mean)",
+      "cum_pct": 31.62,
+      "ann_pct": 10.96,
+      "sharpe": 0.52,
+      "max_dd_pct": -36.22,
+      "avg_turn_pct": 7.77,
+      "excess_pct": 7.66
+    },
+    {
+      "portfolio": "D: 5d_reversal (cand only)",
+      "cum_pct": 26.49,
+      "ann_pct": 9.3,
+      "sharpe": 0.46,
+      "max_dd_pct": -36.07,
+      "avg_turn_pct": 4.6,
+      "excess_pct": 2.52
+    },
+    {
+      "portfolio": "E: base + 5d_reversal (rank-mean)",
+      "cum_pct": 30.28,
+      "ann_pct": 10.53,
+      "sharpe": 0.5,
+      "max_dd_pct": -36.53,
+      "avg_turn_pct": 8.68,
+      "excess_pct": 6.31
+    }
+  ],
+  "marginal_analysis": {
+    "20d_momentum": {
+      "base_alone": 29.506540644795432,
+      "cand_alone": 32.452375971000656,
+      "combined": 31.62100741401874,
+      "base_marginal_pp": -0.8313685569819151,
+      "verdict": "拖累"
+    },
+    "5d_reversal": {
+      "base_alone": 29.506540644795432,
+      "cand_alone": 26.48606148417305,
+      "combined": 30.275819438382335,
+      "base_marginal_pp": 3.789757954209283,
+      "verdict": "互补"
+    }
+  }
+}
