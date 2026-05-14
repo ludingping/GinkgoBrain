@@ -1,0 +1,51 @@
+{
+  "train_start": "2022-01-01",
+  "train_end_actual": "2025-10-09",
+  "n_rows": 2913293,
+  "n_stocks": 4966,
+  "n_dates": 602,
+  "features": [
+    "super_net_inflow_ratio",
+    "big_net_inflow_ratio",
+    "middle_net_inflow_ratio",
+    "small_net_inflow_ratio",
+    "main_net_inflow_ratio",
+    "quote_change",
+    "ret_5d",
+    "ret_20d",
+    "ret_60d",
+    "vol_20d",
+    "position_20d"
+  ],
+  "lgbm_params": {
+    "objective": "regression",
+    "metric": "rmse",
+    "learning_rate": 0.05,
+    "n_estimators": 300,
+    "max_depth": 5,
+    "num_leaves": 31,
+    "min_child_samples": 200,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "reg_alpha": 0.1,
+    "reg_lambda": 0.1,
+    "random_state": 42,
+    "verbose": -1,
+    "n_jobs": -1
+  },
+  "feature_importance": {
+    "vol_20d": 1182,
+    "ret_60d": 1155,
+    "ret_5d": 1122,
+    "ret_20d": 1107,
+    "quote_change": 982,
+    "position_20d": 731,
+    "small_net_inflow_ratio": 518,
+    "super_net_inflow_ratio": 497,
+    "middle_net_inflow_ratio": 406,
+    "big_net_inflow_ratio": 326,
+    "main_net_inflow_ratio": 220
+  },
+  "model_path": "/home/davidlyu/projects/GinkgoBrain/strategies/cn_a_big_money_rotation/models/v0_8_gbdt_full_4y.joblib"
+}

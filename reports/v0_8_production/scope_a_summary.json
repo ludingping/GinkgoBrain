@@ -1,0 +1,69 @@
+{
+  "mode": "scope_a",
+  "predictions_in_sample": true,
+  "first_date": "2023-02-15",
+  "last_date": "2025-10-16",
+  "n_pred_dates": 607,
+  "rows": [
+    {
+      "portfolio": "Simplified (no limit, no lock) avoid Bot 5%",
+      "n_days": 607,
+      "first_date": "2023-02-15",
+      "last_date": "2025-10-16",
+      "cum_pct": 20.91,
+      "ann_pct": 8.22,
+      "sharpe": 0.43,
+      "max_dd_pct": -35.23,
+      "avg_turn_pct": 5.32,
+      "bm2_cum_pct": 15.63,
+      "bm2_ann_pct": 6.22,
+      "excess_pct": 5.29,
+      "excess_ann_pct": 1.99
+    },
+    {
+      "portfolio": "Realistic (limit+lock 3d) avoid Bot 5% @ f=0.0001",
+      "n_days": 607,
+      "first_date": "2023-02-15",
+      "last_date": "2025-10-16",
+      "cum_pct": 20.34,
+      "ann_pct": 8.0,
+      "sharpe": 0.42,
+      "max_dd_pct": -35.86,
+      "avg_turn_pct": 0.81,
+      "bm2_cum_pct": 15.63,
+      "bm2_ann_pct": 6.22,
+      "excess_pct": 4.71,
+      "excess_ann_pct": 1.78
+    },
+    {
+      "portfolio": "Realistic (limit+lock 3d) avoid Bot 5% @ f=0.0005",
+      "n_days": 607,
+      "first_date": "2023-02-15",
+      "last_date": "2025-10-16",
+      "cum_pct": -5.56,
+      "ann_pct": -2.35,
+      "sharpe": 0.06,
+      "max_dd_pct": -42.59,
+      "avg_turn_pct": 0.81,
+      "bm2_cum_pct": -9.26,
+      "bm2_ann_pct": -3.96,
+      "excess_pct": 3.7,
+      "excess_ann_pct": 1.61
+    },
+    {
+      "portfolio": "Realistic (limit+lock 3d) avoid Bot 5% @ f=0.001",
+      "n_days": 607,
+      "first_date": "2023-02-15",
+      "last_date": "2025-10-16",
+      "cum_pct": -30.26,
+      "ann_pct": -13.92,
+      "sharpe": -0.4,
+      "max_dd_pct": -52.63,
+      "avg_turn_pct": 0.81,
+      "bm2_cum_pct": -32.99,
+      "bm2_ann_pct": -15.34,
+      "excess_pct": 2.73,
+      "excess_ann_pct": 1.42
+    }
+  ]
+}

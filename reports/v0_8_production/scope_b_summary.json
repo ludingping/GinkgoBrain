@@ -1,0 +1,85 @@
+{
+  "mode": "scope_b",
+  "predictions_in_sample": false,
+  "first_date": "2024-01-02",
+  "last_date": "2025-10-09",
+  "n_pred_dates": 390,
+  "folds": [
+    [
+      "F1",
+      "2022-04-01",
+      "2023-12-31",
+      "2024-01-01",
+      "2024-12-31"
+    ],
+    [
+      "F2",
+      "2022-04-01",
+      "2024-12-31",
+      "2025-01-01",
+      "2025-12-31"
+    ]
+  ],
+  "rows": [
+    {
+      "portfolio": "Simplified (no limit, no lock) avoid Bot 5%",
+      "n_days": 390,
+      "first_date": "2024-01-02",
+      "last_date": "2025-10-09",
+      "cum_pct": 34.74,
+      "ann_pct": 21.31,
+      "sharpe": 0.76,
+      "max_dd_pct": -29.82,
+      "avg_turn_pct": 5.35,
+      "bm2_cum_pct": 29.54,
+      "bm2_ann_pct": 18.25,
+      "excess_pct": 5.2,
+      "excess_ann_pct": 3.05
+    },
+    {
+      "portfolio": "Realistic (limit+lock 3d) avoid Bot 5% @ f=0.0001",
+      "n_days": 390,
+      "first_date": "2024-01-02",
+      "last_date": "2025-10-09",
+      "cum_pct": 32.33,
+      "ann_pct": 19.9,
+      "sharpe": 0.72,
+      "max_dd_pct": -29.83,
+      "avg_turn_pct": 0.87,
+      "bm2_cum_pct": 29.54,
+      "bm2_ann_pct": 18.25,
+      "excess_pct": 2.79,
+      "excess_ann_pct": 1.64
+    },
+    {
+      "portfolio": "Realistic (limit+lock 3d) avoid Bot 5% @ f=0.0005",
+      "n_days": 390,
+      "first_date": "2024-01-02",
+      "last_date": "2025-10-09",
+      "cum_pct": 13.26,
+      "ann_pct": 8.4,
+      "sharpe": 0.41,
+      "max_dd_pct": -31.42,
+      "avg_turn_pct": 0.87,
+      "bm2_cum_pct": 10.88,
+      "bm2_ann_pct": 6.92,
+      "excess_pct": 2.39,
+      "excess_ann_pct": 1.49
+    },
+    {
+      "portfolio": "Realistic (limit+lock 3d) avoid Bot 5% @ f=0.001",
+      "n_days": 390,
+      "first_date": "2024-01-02",
+      "last_date": "2025-10-09",
+      "cum_pct": -6.76,
+      "ann_pct": -4.43,
+      "sharpe": 0.03,
+      "max_dd_pct": -37.09,
+      "avg_turn_pct": 0.87,
+      "bm2_cum_pct": -8.72,
+      "bm2_ann_pct": -5.74,
+      "excess_pct": 1.97,
+      "excess_ann_pct": 1.31
+    }
+  ]
+}

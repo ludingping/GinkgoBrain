@@ -277,3 +277,112 @@ def load_security_list_active() -> pd.DataFrame:
     with get_contract_engine().connect() as conn:
         df = pd.read_sql(sql, conn)
     return df.reset_index(drop=True)
+
+
+# ============================================================================
+# MongoDB 路径 (treasure.stock_fund_flow) - 2026-05-14 v0.8 产品化加入
+# ============================================================================
+# 字段对应：
+#   stock_id (str)          股票代码 (无 SH/SZ 前缀)
+#   date (datetime)         交易日 (UTC 00:00)
+#   price (float)           收盘价 (元)
+#   quote_change (float)    日涨跌幅 (%)
+#   super_net_inflow_ratio  特大单净流入占成交比 (%)
+#   big_net_inflow_ratio    大单净流入占成交比 (%)
+#   middle_net_inflow_ratio 中单净流入占成交比 (%)
+#   small_net_inflow_ratio  小单净流入占成交比 (%)
+# 注意：mongo 无 volume/open/high/low，realistic backtest 的 capacity 约束跳过；
+#       一字涨跌停用 |quote_change_{T+1}| >= 9.95 近似。
+
+MONGO_DEFAULT_HOST = "192.168.1.69"
+MONGO_DEFAULT_PORT = 27017
+MONGO_DEFAULT_USER = "admin"
+MONGO_DEFAULT_DB = "treasure"
+MONGO_DEFAULT_COLL = "stock_fund_flow"
+
+
+def load_mongo_money_flow_panel(
+    start: str | pd.Timestamp,
+    end: str | pd.Timestamp | None = None,
+    min_coverage_days: int = 500,
+    universe_min_pct: float = 0.5,
+    *,
+    host: str = MONGO_DEFAULT_HOST,
+    port: int = MONGO_DEFAULT_PORT,
+    user: str = MONGO_DEFAULT_USER,
+    password: str | None = None,
+    auth_db: str = "admin",
+    db: str = MONGO_DEFAULT_DB,
+    coll: str = MONGO_DEFAULT_COLL,
+) -> dict[str, pd.DataFrame]:
+    """读 mongo treasure.stock_fund_flow 范围内全部数据, 返回 pivoted panels.
+
+    Args:
+        start: 起始日期 (含)
+        end: 终止日期 (None 表示 mongo 中最新)
+        min_coverage_days: 个股最小覆盖天数 (低于此值的股票从 universe 删)
+        universe_min_pct: 每日 universe 至少占最大单日 universe 的比例 (避日末断崖, lesson L6)
+        password: mongo 密码; None 时从环境变量 MONGO_PWD 读
+
+    Returns:
+        dict 包含 price/quote_change/super/big/middle/small 6 个 DataFrame
+        (index=date, columns=stock_id, 均已 trim universe).
+    """
+    import os
+    try:
+        from pymongo import MongoClient
+    except ImportError as e:
+        raise RuntimeError("pymongo not installed; run: uv add pymongo") from e
+
+    pwd = password or os.environ.get("MONGO_PWD")
+    if not pwd:
+        raise RuntimeError("MONGO_PWD env var required (or pass password=)")
+
+    start_ts = pd.Timestamp(start)
+    query: dict = {"date": {"$gte": start_ts.to_pydatetime()}}
+    if end is not None:
+        end_ts = pd.Timestamp(end)
+        query["date"]["$lte"] = end_ts.to_pydatetime()
+
+    client = MongoClient(host=host, port=port, username=user, password=pwd, authSource=auth_db)
+    col = client[db][coll]
+    logger.info("Loading mongo %s.%s range %s → %s ...", db, coll, start_ts.date(),
+                end_ts.date() if end is not None else "latest")
+    rows = list(col.find(
+        query,
+        {"_id": 0, "stock_id": 1, "date": 1, "price": 1, "quote_change": 1,
+         "super_net_inflow_ratio": 1, "big_net_inflow_ratio": 1,
+         "middle_net_inflow_ratio": 1, "small_net_inflow_ratio": 1},
+    ))
+    df = pd.DataFrame(rows)
+    if df.empty:
+        raise RuntimeError(f"mongo query returned 0 rows for {query}")
+    df["date"] = pd.to_datetime(df["date"])
+    for c in ["price", "quote_change", "super_net_inflow_ratio",
+              "big_net_inflow_ratio", "middle_net_inflow_ratio",
+              "small_net_inflow_ratio"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    cov = df.groupby("stock_id").size()
+    keep = cov[cov >= min_coverage_days].index
+    df = df[df["stock_id"].isin(keep)]
+    logger.info("After coverage filter: %d rows / %d stocks", len(df), len(keep))
+
+    def piv(field):
+        return df.pivot_table(index="date", columns="stock_id", values=field, aggfunc="first")
+
+    panel = {
+        "price": piv("price"),
+        "quote_change": piv("quote_change"),
+        "super": piv("super_net_inflow_ratio"),
+        "big": piv("big_net_inflow_ratio"),
+        "middle": piv("middle_net_inflow_ratio"),
+        "small": piv("small_net_inflow_ratio"),
+    }
+    daily_size = panel["price"].notna().sum(axis=1)
+    max_size = int(daily_size.max())
+    valid_dates = panel["price"].index[daily_size >= max_size * universe_min_pct]
+    for k in panel:
+        panel[k] = panel[k].loc[valid_dates]
+    logger.info("Final panel: %d dates, %d stocks", len(panel["price"]), panel["price"].shape[1])
+    return panel

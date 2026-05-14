@@ -215,3 +215,161 @@ def dual_signal_overlap(
     if not union:
         return 0.0
     return len(set_a & set_b) / len(union)
+
+
+# ============================================================================
+# v0.8 GBDT 多信号合成 (2026-05-14 加入)
+# ============================================================================
+# 11 features = 5 fund-flow + 6 price/momentum; target = 5d fwd_ret 截面 rank.
+# 训练 = LightGBM regression on cross-sectional pct rank.
+
+V0_8_FUND_FLOW_FEATS = [
+    "super_net_inflow_ratio", "big_net_inflow_ratio",
+    "middle_net_inflow_ratio", "small_net_inflow_ratio",
+    "main_net_inflow_ratio",  # = super + big
+]
+V0_8_PRICE_FEATS = [
+    "quote_change", "ret_5d", "ret_20d", "ret_60d", "vol_20d", "position_20d",
+]
+V0_8_ALL_FEATS = V0_8_FUND_FLOW_FEATS + V0_8_PRICE_FEATS
+V0_8_IC_HORIZON = 5  # 5d fwd_ret 做 target
+
+V0_8_DEFAULT_LGBM_PARAMS = {
+    "objective": "regression",
+    "metric": "rmse",
+    "learning_rate": 0.05,
+    "n_estimators": 300,
+    "max_depth": 5,
+    "num_leaves": 31,
+    "min_child_samples": 200,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "reg_alpha": 0.1,
+    "reg_lambda": 0.1,
+    "random_state": 42,
+    "verbose": -1,
+    "n_jobs": -1,
+}
+
+
+def _build_v0_8_features_only(panel: dict) -> dict[str, pd.DataFrame]:
+    price = panel["price"]
+    qc = panel["quote_change"]
+    ret_5d = price / price.shift(5) - 1
+    ret_20d = price / price.shift(20) - 1
+    ret_60d = price / price.shift(60) - 1
+    daily_ret = price.pct_change()
+    vol_20d = daily_ret.rolling(20).std()
+    high_20d = price.rolling(20).max()
+    low_20d = price.rolling(20).min()
+    position_20d = (price - low_20d) / (high_20d - low_20d).replace(0, np.nan)
+    return {
+        "super_net_inflow_ratio": panel["super"],
+        "big_net_inflow_ratio": panel["big"],
+        "middle_net_inflow_ratio": panel["middle"],
+        "small_net_inflow_ratio": panel["small"],
+        "main_net_inflow_ratio": panel["super"] + panel["big"],
+        "quote_change": qc,
+        "ret_5d": ret_5d,
+        "ret_20d": ret_20d,
+        "ret_60d": ret_60d,
+        "vol_20d": vol_20d,
+        "position_20d": position_20d,
+    }
+
+
+def build_v0_8_feature_panel(panel: dict, horizon: int = V0_8_IC_HORIZON) -> pd.DataFrame:
+    """Long-format: V0_8_ALL_FEATS + target_rank + fwd_ret; 用于训练 (drop NaN)."""
+    fps = _build_v0_8_features_only(panel)
+    price = panel["price"]
+    fwd_ret = price.shift(-horizon) / price.shift(-1) - 1
+    target_rank = fwd_ret.rank(axis=1, pct=True)
+    frames = [pv.stack(dropna=False).rename(name) for name, pv in fps.items()]
+    frames.append(target_rank.stack(dropna=False).rename("target_rank"))
+    frames.append(fwd_ret.stack(dropna=False).rename("fwd_ret"))
+    df_long = pd.concat(frames, axis=1).reset_index()
+    df_long.columns.values[:2] = ["date", "stock_id"]
+    return df_long.dropna(subset=V0_8_ALL_FEATS + ["target_rank"])
+
+
+def build_v0_8_inference_panel(panel: dict) -> pd.DataFrame:
+    """Long-format inference: V0_8_ALL_FEATS only (无 target), 保留尾部 N 天."""
+    fps = _build_v0_8_features_only(panel)
+    frames = [pv.stack(dropna=False).rename(name) for name, pv in fps.items()]
+    df_long = pd.concat(frames, axis=1).reset_index()
+    df_long.columns.values[:2] = ["date", "stock_id"]
+    return df_long.dropna(subset=V0_8_ALL_FEATS)
+
+
+def train_v0_8_model(features_df: pd.DataFrame, lgbm_params: dict | None = None):
+    """LGBMRegressor 预测 target_rank."""
+    import lightgbm as lgb
+    params = dict(V0_8_DEFAULT_LGBM_PARAMS)
+    if lgbm_params:
+        params.update(lgbm_params)
+    X = features_df[V0_8_ALL_FEATS].values
+    y = features_df["target_rank"].values
+    model = lgb.LGBMRegressor(**params)
+    model.fit(X, y)
+    return model
+
+
+def save_v0_8_model(model, path) -> None:
+    import joblib
+    from pathlib import Path
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(model, p)
+
+
+def load_v0_8_model(path):
+    import joblib
+    return joblib.load(path)
+
+
+def predict_v0_8(model, features_df: pd.DataFrame) -> pd.Series:
+    """Returns Series indexed by (date, stock_id), values = pred."""
+    X = features_df[V0_8_ALL_FEATS].values
+    preds = model.predict(X)
+    return pd.Series(preds, index=pd.MultiIndex.from_arrays(
+        [features_df["date"], features_df["stock_id"]],
+        names=["date", "stock_id"]), name="pred")
+
+
+def select_v0_8_avoid_bot_for_date(
+    predictions_pivot: pd.DataFrame,
+    date,
+    universe: Iterable[str] | None = None,
+    bot_pct: float = 0.05,
+) -> list[str]:
+    """剔除 pred 最低 bot_pct, 返回剩余 stock_id sorted."""
+    if date not in predictions_pivot.index:
+        return []
+    row = predictions_pivot.loc[date].dropna()
+    if universe is not None:
+        univ_set = set(universe)
+        row = row[row.index.isin(univ_set)]
+    if len(row) == 0:
+        return []
+    bot_thr = row.quantile(bot_pct)
+    keep = row[row > bot_thr]
+    return sorted(keep.index.tolist())
+
+
+def select_v0_8_top_n_for_date(
+    predictions_pivot: pd.DataFrame,
+    date,
+    universe: Iterable[str] | None = None,
+    n: int = TARGET_TOP_N,
+) -> list[str]:
+    """选 pred 最高 n 只 (v0_1/v0_2 风格)."""
+    if date not in predictions_pivot.index:
+        return []
+    row = predictions_pivot.loc[date].dropna()
+    if universe is not None:
+        univ_set = set(universe)
+        row = row[row.index.isin(univ_set)]
+    if len(row) == 0:
+        return []
+    return sorted(row.sort_values(ascending=False).head(n).index.tolist())
