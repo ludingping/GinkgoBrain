@@ -1,0 +1,117 @@
+{
+  "params": {
+    "folds": [
+      [
+        "F1",
+        "2022-04-01",
+        "2023-12-31",
+        "2024-01-01",
+        "2024-12-31"
+      ],
+      [
+        "F2",
+        "2022-04-01",
+        "2024-12-31",
+        "2025-01-01",
+        "2025-12-31"
+      ],
+      [
+        "F3",
+        "2022-04-01",
+        "2025-12-31",
+        "2026-01-01",
+        "2026-12-31"
+      ]
+    ],
+    "features": [
+      "super_net_inflow_ratio",
+      "big_net_inflow_ratio",
+      "middle_net_inflow_ratio",
+      "small_net_inflow_ratio",
+      "main_net_inflow_ratio",
+      "quote_change",
+      "ret_5d",
+      "ret_20d",
+      "ret_60d",
+      "vol_20d",
+      "position_20d"
+    ],
+    "lgbm": {
+      "objective": "regression",
+      "metric": "rmse",
+      "learning_rate": 0.05,
+      "n_estimators": 300,
+      "max_depth": 5,
+      "num_leaves": 31,
+      "min_child_samples": 200,
+      "feature_fraction": 0.8,
+      "bagging_fraction": 0.8,
+      "bagging_freq": 5,
+      "reg_alpha": 0.1,
+      "reg_lambda": 0.1,
+      "random_state": 42,
+      "verbose": -1,
+      "n_jobs": -1
+    },
+    "friction": 0.0001,
+    "excl_bot_pct": 0.05,
+    "ic_horizon": 5
+  },
+  "fold_results": [
+    {
+      "n_days": 238,
+      "ic_mean": 0.07301557169078911,
+      "ic_t": 7.056566432058836,
+      "ls_mean": 0.014140802001479692,
+      "ls_t": 6.98451747884513,
+      "fold": "F1",
+      "n_test": 1144737
+    },
+    {
+      "n_days": 146,
+      "ic_mean": 0.061999092320018774,
+      "ic_t": 4.911978916597365,
+      "ls_mean": 0.008502767337166662,
+      "ls_t": 2.610573781018747,
+      "fold": "F2",
+      "n_test": 740892
+    },
+    {
+      "n_days": 384,
+      "ic_mean": 0.06882701443002748,
+      "ic_t": 8.59874578591436,
+      "ls_mean": 0.011997174238485677,
+      "ls_t": 6.793559690215749,
+      "fold": "OVERALL",
+      "n_test": 1885629
+    }
+  ],
+  "feature_importance_avg": {
+    "super_net_inflow_ratio": 564.0,
+    "big_net_inflow_ratio": 413.0,
+    "middle_net_inflow_ratio": 455.5,
+    "small_net_inflow_ratio": 576.5,
+    "main_net_inflow_ratio": 267.5,
+    "quote_change": 913.0,
+    "ret_5d": 938.0,
+    "ret_20d": 1004.0,
+    "ret_60d": 1100.5,
+    "vol_20d": 1117.5,
+    "position_20d": 752.0
+  },
+  "portfolio": {
+    "cum_pct": 34.7411036384216,
+    "ann_pct": 21.308741099984285,
+    "sharpe": 0.7550289836987785,
+    "max_dd_pct": -29.824770941187108,
+    "avg_turn_pct": 5.353577150315734,
+    "excess_pct": 5.200723368976057,
+    "n_oos_days": 390,
+    "first_date": "2024-01-02",
+    "last_date": "2025-10-09"
+  },
+  "bm2_oos": {
+    "cum_pct": 29.540380269445542,
+    "ann_pct": 18.254518346792125
+  }
+}
