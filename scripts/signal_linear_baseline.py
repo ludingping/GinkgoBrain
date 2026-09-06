@@ -180,9 +180,18 @@ def load_df_from_config(
 
 
 def build_dataset_from_df(
-    df_raw: pd.DataFrame, signal_cols: list[str], horizon: int
+    df_raw: pd.DataFrame,
+    signal_cols: list[str],
+    horizon: int,
+    *,
+    extra_cols: tuple[str, ...] = (),
 ) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
-    """Return (X, y_cls, y_reg) aligned. Drops warmup + last `horizon` rows."""
+    """Return (X, y_cls, y_reg) aligned. Drops warmup + last `horizon` rows.
+
+    `extra_cols` (e.g. ("timestamp",)) are carried through in X after the
+    signal columns so a caller can build time-based folds; they are not
+    features and the caller must drop them before fitting.
+    """
     df_ind = add_indicators(df_raw)
     df = add_signals(df_ind)
     # 合约信号：若 OHLCV 已 merge 了 funding_rate/sum_open_interest/liq_*_usd 列就生效；
@@ -199,7 +208,7 @@ def build_dataset_from_df(
     y_reg = np.log(fut_close / df["close"])
 
     keep = y_reg.notna()
-    return df.loc[keep, signal_cols].reset_index(drop=True), \
+    return df.loc[keep, [*signal_cols, *extra_cols]].reset_index(drop=True), \
            y_cls.loc[keep].reset_index(drop=True), \
            y_reg.loc[keep].reset_index(drop=True)
 

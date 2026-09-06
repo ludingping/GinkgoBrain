@@ -71,3 +71,48 @@ def test_split_by_dates_accepts_tz_aware_inputs():
     v0 = pd.Timestamp("2025-01-20", tz="UTC")
     sp = split_by_dates(df, v0, prefix_rows=0)
     assert sp.val["timestamp"].iloc[0] == v0.tz_convert("Asia/Shanghai")
+
+
+# ─── time_folds ──────────────────────────────────────────────────────────────
+
+def _ts_index(n: int, freq: str = "4h") -> pd.Series:
+    return pd.Series(pd.date_range("2021-01-01", periods=n, freq=freq, tz="Asia/Shanghai"))
+
+
+def test_time_folds_expanding_window_covers_tail_only_once():
+    from utils.splits import time_folds
+    ts = _ts_index(400)
+    folds = time_folds(ts, n_splits=4)
+    assert len(folds) == 4
+    # expanding: each fold's val starts where the previous ended
+    for prev, cur in zip(folds, folds[1:]):
+        assert prev.val_end == cur.val_start
+    assert folds[-1].val_end > ts.iloc[-1]
+    # val slices are disjoint and cover the last 4/5 of the range
+    assert folds[0].val_start == ts.iloc[80]
+
+
+def test_time_folds_embargo_gap_before_val_start():
+    from utils.splits import time_folds
+    ts = _ts_index(400)
+    folds = time_folds(ts, n_splits=4, embargo=pd.Timedelta("24h"))
+    for f in folds:
+        assert f.train_end == f.val_start - pd.Timedelta("24h")
+
+
+def test_time_folds_masks_exclude_embargo_rows_and_are_disjoint():
+    from utils.splits import time_folds
+    ts = _ts_index(400)
+    f = time_folds(ts, n_splits=4, embargo=pd.Timedelta("24h"))[0]
+    tr, va = f.masks(ts)
+    assert not (tr & va).any()
+    assert ts[tr].max() < f.val_start - pd.Timedelta("24h")
+    assert ts[va].min() == f.val_start
+    # 6 bars of 4h sit inside the 24h embargo
+    assert tr.sum() == 80 - 6
+
+
+def test_time_folds_rejects_duplicate_or_unsorted_ok_but_too_few_points():
+    from utils.splits import time_folds
+    with pytest.raises(ValueError):
+        time_folds(_ts_index(3), n_splits=4)

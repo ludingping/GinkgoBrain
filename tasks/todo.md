@@ -1,3 +1,44 @@
+# 多币种合并线性基线（2026-09-06）
+
+假设：4h 信号池 AUC≈0.53 的瓶颈是样本量（BTC 单币 ~12k 根 bar），而非特征。若 BTC/ETH/BNB/SOL 合并训练后
+BTC 留出段 AUC 明显上升，则多币种 PPO 值得投入；若不动，转向合约数据特征。
+
+- [x] 1. `utils/splits.py::time_folds`：按时间戳的扩展窗口折 + embargo（先写测试 RED）
+- [x] 2. `scripts/signal_linear_baseline.py::build_dataset_from_df` 加 `extra_cols`（保留 timestamp）
+- [x] 3. `scripts/signal_linear_baseline_pooled.py`（+`--model lgbm`）：三组对照 single / pooled / transfer(leave-target-out)，LogReg，AUC
+- [x] 4. 跑 4h 四组合（logreg/lgbm × v2 10 信号 / probe 19 信号）→ `reports/signal_linear_baseline_pooled_4h_*.md`
+- [x] 5. 审查小结（见下）
+
+## 审查（多币种合并基线，2026-09-06）
+
+数据：BTC/ETH/BNB/SOL 4h，2021-01→2026-09，每币 12,430 根、合并 49,164 行；目标 = 未来 6 根（1 天）方向；
+3 个按时间戳切的扩展窗口折（embargo 6 根）。三种训练方式：single（本币历史）/ pooled（四币）/ transfer（只用其他三币）。
+
+### BTC 留出段 AUC（3 折均值）
+
+| 模型 | 信号池 | single | pooled | transfer | Δ pooled−single |
+|---|---|---|---|---|---|
+| LogReg | v2 10 信号 | 0.5256 | 0.5287 | 0.5273 | +0.003 |
+| LogReg | 19 信号（v2+淘汰 9 个） | 0.5235 | 0.5271 | 0.5248 | +0.004 |
+| LightGBM | v2 10 信号 | 0.5138 | 0.5244 | 0.5286 | +0.011 |
+| LightGBM | 19 信号 | 0.5148 | 0.5260 | 0.5275 | +0.011 |
+
+其他币同样：ETH 最高（pooled lgbm/19 = 0.541），SOL 最低（≈0.51-0.52），无一越过 0.55。
+
+### 结论
+- **样本量不是瓶颈，特征是。** 四倍样本只把 BTC AUC 抬 0.003–0.011，全在折间波动（±0.02）以内；LightGBM 单币 0.514 < LogReg 0.526，说明非线性模型在 1.2 万根上只是过拟合，合并后也只是回到线性水平，并没有挖出新结构。
+- **transfer ≈ pooled ≈ single**：只用 ETH/BNB/SOL 训练、在 BTC 上测，和用 BTC 自己训练一样好。信号池里的规律确实是跨币种共享的，但共享的那部分本身只有 0.53 的信息量。
+- **最近一折（2025-04→2026-09）所有组合都掉到 0.50–0.52**，正是 PPO v2 的 val/test 区间。当前 regime 下这套技术信号几乎没有方向信息，与 v2 训练"train↑ eval↓"和线上 gate_only 占优一致。
+- 决策：**不做多币种 PPO 训练**。下一步转向新数据源：合约信号（funding / OI / 爆仓）在 4h 的边际贡献；`sig_funding_*`/`sig_oi_*`/`sig_liq_*` 在 v2 筛选时因训练期全零被剔除，需先确认 ginkgo_bole 合约表覆盖 2021 起的历史，再用 `--with-contracts` 重跑 `signal_linear_baseline` 和本脚本。
+
+### 复现
+```
+uv run python -m scripts.signal_linear_baseline_pooled --cache-dir <dir> --model {logreg,lgbm} \
+    --signals-config {config/signals_v2_4h.yaml,config/signals_4h_probe19.yaml}
+```
+
+---
+
 # BTC/USDT 4h PPO 重训 v2 —— 对齐 Spider 虚拟盘（2026-09-05，PR ludingping/GinkgoSpider#20）
 
 计划全文：`~/.claude/plans/peppy-hugging-magpie.md`

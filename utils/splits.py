@@ -93,3 +93,65 @@ def split_by_dates(
             f"split_by_dates produced an empty slice: train={len(train)}, val={len(val)}"
         )
     return DateSplit(train=train, val=val, test=test)
+
+
+# ─── Time-based CV folds (pooled multi-asset safe) ───────────────────────────
+
+@dataclass(frozen=True)
+class TimeFold:
+    """One expanding-window fold defined purely by timestamps.
+
+    train rows: ts <  train_end   (= val_start − embargo)
+    val rows:   val_start <= ts < val_end
+
+    Defining folds by time rather than by row index is what makes them safe for
+    a frame that stacks several assets: two assets at the same timestamp are
+    highly correlated, so an index split would leak the validation period into
+    training through a sibling asset. `embargo` (typically the label horizon)
+    keeps train labels from peeking into the validation window.
+    """
+    fold: int
+    train_end: pd.Timestamp
+    val_start: pd.Timestamp
+    val_end: pd.Timestamp
+
+    def masks(self, ts: pd.Series) -> tuple[pd.Series, pd.Series]:
+        train = ts < self.train_end
+        val = (ts >= self.val_start) & (ts < self.val_end)
+        return train, val
+
+
+def time_folds(
+    ts: pd.Series,
+    n_splits: int,
+    *,
+    embargo: pd.Timedelta = pd.Timedelta(0),
+) -> list[TimeFold]:
+    """Expanding-window folds over the unique timestamps in `ts`.
+
+    Mirrors sklearn's TimeSeriesSplit boundaries (first 1/(n_splits+1) of the
+    unique timestamps is always training-only) but returns timestamp bounds so
+    the same folds apply to every asset in a pooled frame.
+    """
+    uniq = pd.Series(pd.unique(ts)).sort_values().reset_index(drop=True)
+    if len(uniq) < n_splits + 1:
+        raise ValueError(
+            f"time_folds: need at least {n_splits + 1} unique timestamps, got {len(uniq)}"
+        )
+    if embargo < pd.Timedelta(0):
+        raise ValueError("time_folds: embargo must be non-negative")
+    n = len(uniq)
+    fold_size = n // (n_splits + 1)
+    first_val = n - fold_size * n_splits
+    step = pd.Timedelta(0) if n < 2 else (uniq.iloc[-1] - uniq.iloc[-2])
+    bounds = [uniq.iloc[first_val + k * fold_size] for k in range(n_splits)]
+    bounds.append(uniq.iloc[-1] + step)          # exclusive end past the last bar
+    return [
+        TimeFold(
+            fold=k + 1,
+            train_end=bounds[k] - embargo,
+            val_start=bounds[k],
+            val_end=bounds[k + 1],
+        )
+        for k in range(n_splits)
+    ]

@@ -1,0 +1,22 @@
+version: 1
+note: v2 pool + 9 eliminated (sharpe/corr) for pooled probe
+signals:
+- sig_trend_macd_hist
+- sig_trend_slope_21
+- sig_mom_rsi_trend
+- sig_mom_roc_zscore
+- sig_vol_atr_pct
+- sig_vol_bb_width
+- sig_vol_bb_position
+- sig_volume_obv_slope
+- sig_volume_ratio
+- sig_regime_return_60
+- sig_mom_stoch_state
+- sig_hf_range_position
+- sig_hf_body_ratio
+- sig_mr_rsi_extreme
+- sig_mr_deviation_atr
+- sig_trend_price_above_ma
+- sig_trend_ema_cross
+- sig_hf_vol_zscore_24
+- sig_mom_rsi_zone
