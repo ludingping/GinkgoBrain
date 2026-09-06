@@ -149,3 +149,23 @@ def test_oi_probe_features_semantics() -> None:
     with pytest.raises(ValueError, match="sum_open_interest"):
         add_probe_features(pd.DataFrame({"close": [1.0], "funding_rate": [0.0]}), ["oi_chg_1d"], "4h")
     assert required_sources(["oi_chg_1d", "funding_cum_3d"]) == {"oi", "funding"}
+
+
+def test_metrics_ignore_infinite_values() -> None:
+    df = _df(planted=1.0)
+    fwd = forward_log_return(df["close"], 6)
+    sig = df["sig_plant"].copy()
+    sig.iloc[10] = np.inf
+    sig.iloc[11] = -np.inf
+    assert np.isfinite(rank_ic(sig, fwd)) and np.isfinite(auc(sig, fwd))
+    folds = time_folds(df["timestamp"], 3, embargo=6 * pd.Timedelta("4h"))
+    df2 = df.assign(sig_plant=sig)
+    assert evaluate_signal(df2, "sig_plant", 6, folds)[0].n > 0
+
+
+def test_oi_change_from_zero_is_nan_not_inf() -> None:
+    df = pd.DataFrame({"timestamp": pd.date_range("2024-01-01", periods=20, freq="4h", tz="UTC"),
+                       "close": np.linspace(1, 2, 20), "sum_open_interest": [0.0] * 6 + [1.0] * 14})
+    out = add_probe_features(df, ["oi_chg_1d", "oi_capitulation_1d"], "4h")
+    assert not np.isinf(out["oi_chg_1d"].to_numpy()).any()
+    assert not np.isinf(out["oi_capitulation_1d"].to_numpy()).any()

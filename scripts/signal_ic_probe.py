@@ -81,15 +81,15 @@ def oi_level_z(df: pd.DataFrame, timeframe: str, span: str = "90D") -> pd.Series
 
 
 def oi_change(df: pd.DataFrame, timeframe: str, span: str = "1D") -> pd.Series:
-    """OI pct change over `span` (raw)."""
-    return _oi(df).pct_change(_bars(span, timeframe))
+    """OI pct change over `span` (raw); ±inf (change from a zero OI row) → NaN."""
+    return _oi(df).pct_change(_bars(span, timeframe)).replace([np.inf, -np.inf], np.nan)
 
 
 def oi_capitulation(df: pd.DataFrame, timeframe: str, span: str = "1D") -> pd.Series:
     """H2b: forced long unwind proxy = |OI drop| when both OI and price fell over `span`, else 0.
     Positive values = capitulation; predicted to precede a rebound (IC > 0)."""
     k = _bars(span, timeframe)
-    d_oi = _oi(df).pct_change(k)
+    d_oi = oi_change(df, timeframe, span)
     ret = np.log(df["close"] / df["close"].shift(k))
     both_down = (d_oi < 0) & (ret < 0)
     return (-d_oi).where(both_down, 0.0)
@@ -98,7 +98,7 @@ def oi_capitulation(df: pd.DataFrame, timeframe: str, span: str = "1D") -> pd.Se
 def oi_new_longs(df: pd.DataFrame, timeframe: str, span: str = "1D") -> pd.Series:
     """H2c: OI up & price up over `span` → OI increase, else 0 (trend-continuation confirmation)."""
     k = _bars(span, timeframe)
-    d_oi = _oi(df).pct_change(k)
+    d_oi = oi_change(df, timeframe, span)
     ret = np.log(df["close"] / df["close"].shift(k))
     return d_oi.where((d_oi > 0) & (ret > 0), 0.0)
 
@@ -174,15 +174,21 @@ def forward_log_return(close: pd.Series, horizon: int) -> pd.Series:
     return np.log(close.shift(-horizon) / close)
 
 
+def _finite(signal: pd.Series, fwd: pd.Series) -> pd.Series:
+    """Rows usable for a metric: both finite (NaN and ±inf excluded — e.g. OI pct_change from 0)."""
+    return pd.Series(np.isfinite(signal.to_numpy(dtype=float)) & np.isfinite(fwd.to_numpy(dtype=float)),
+                     index=signal.index)
+
+
 def rank_ic(signal: pd.Series, fwd: pd.Series) -> float:
-    m = signal.notna() & fwd.notna()
+    m = _finite(signal, fwd)
     if m.sum() < 10 or signal[m].nunique() < 2:
         return float("nan")
     return float(spearmanr(signal[m], fwd[m]).correlation)
 
 
 def decile_spread_bps(signal: pd.Series, fwd: pd.Series, q: float = DECILE) -> float:
-    m = signal.notna() & fwd.notna()
+    m = _finite(signal, fwd)
     s, f = signal[m], fwd[m]
     if len(s) < 20:
         return float("nan")
@@ -191,7 +197,7 @@ def decile_spread_bps(signal: pd.Series, fwd: pd.Series, q: float = DECILE) -> f
 
 
 def auc(signal: pd.Series, fwd: pd.Series) -> float:
-    m = signal.notna() & fwd.notna()
+    m = _finite(signal, fwd)
     y = (fwd[m] > 0).astype(int)
     if y.nunique() < 2 or signal[m].nunique() < 2:
         return float("nan")
@@ -242,7 +248,7 @@ def evaluate_signal(
     for f in folds:
         m = (ts >= f.val_start) & (ts < f.val_end) & keep
         s, r = df.loc[m, signal], fwd[m]
-        out.append(FoldStat(f.fold, f.val_start, f.val_end, int((s.notna() & r.notna()).sum()),
+        out.append(FoldStat(f.fold, f.val_start, f.val_end, int(_finite(s, r).sum()),
                             rank_ic(s, r), decile_spread_bps(s, r), auc(s, r)))
     return out
 
