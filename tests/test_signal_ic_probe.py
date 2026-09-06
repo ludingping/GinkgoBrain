@@ -54,6 +54,9 @@ def test_verdict_rules() -> None:
     ok, why = verdict([0.05, 0.02, 0.06])
     assert not ok and "fold [2]" in why
     assert not verdict([0.05, float("nan"), 0.06])[0]
+    ok, why = verdict([0.05, 0.04, 0.06], ns=[1000, 120, 900])
+    assert not ok and "n<300 on fold [2]" in why
+    assert verdict([0.05, 0.04, 0.06], ns=[1000, 800, 900])[0]
 
 
 def test_probe_features_windows_on_4h() -> None:
@@ -99,3 +102,50 @@ def test_evaluate_signal_mask_restricts_rows() -> None:
     for a, b in zip(full, half):
         assert abs(b.n - a.n / 2) <= 1
         assert np.sign(b.ic) == np.sign(a.ic)
+
+
+def test_parse_where_and_mask() -> None:
+    from scripts.signal_ic_probe import parse_where, where_mask
+    assert parse_where("dist_sma200<0.10") == ("dist_sma200", "<", 0.10)
+    assert parse_where("x>=-0.05") == ("x", ">=", -0.05)
+    with pytest.raises(ValueError):
+        parse_where("dist_sma200")
+    df = pd.DataFrame({"a": [0.05, 0.2, np.nan, -0.1], "b": [1.0, 1.0, 1.0, 0.0]})
+    m = where_mask(df, [("a", "<", 0.1), ("b", ">", 0.5)])
+    assert m.tolist() == [True, False, False, False]
+    with pytest.raises(ValueError, match="not in data"):
+        where_mask(df, [("zzz", "<", 1.0)])
+
+
+def test_dist_sma200_feature_and_z_features() -> None:
+    df = _df(n=1500)
+    out = add_probe_features(df, ["dist_sma200", "funding_cum_3d_z"], "4h")
+    d = out["dist_sma200"]
+    assert d.isna().sum() > 0 and d.notna().sum() > 0          # SMA warmup then values
+    # rebuild independently: last closed UTC day close / SMA200 - 1
+    daily = df.set_index("timestamp")["close"].resample("1D", closed="left", label="left").last()
+    dist = daily / daily.rolling(200).mean() - 1
+    last_day = (df["timestamp"] + pd.Timedelta("4h")).dt.floor("D") - pd.Timedelta(days=1)
+    expect = dist.reindex(pd.DatetimeIndex(last_day)).to_numpy()
+    np.testing.assert_allclose(d.to_numpy(), expect, equal_nan=True)
+    assert out["funding_cum_3d_z"].dropna().between(-1, 1).all()
+
+
+def test_oi_probe_features_semantics() -> None:
+    n = 600
+    rng = np.random.default_rng(5)
+    df = pd.DataFrame({"timestamp": pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC"),
+                       "close": 100 * np.exp(np.cumsum(rng.normal(0, 0.01, n))),
+                       "sum_open_interest": 1e5 + rng.normal(0, 1e3, n).cumsum()})
+    # plant a capitulation at bar 500: OI −10 % and price −5 % over the prior day (6 bars)
+    df.loc[495:, "sum_open_interest"] *= 0.90
+    df.loc[495:, "close"] *= 0.95
+    out = add_probe_features(df, ["oi_level_90d_z", "oi_chg_1d", "oi_capitulation_1d", "oi_new_longs_1d"], "4h")
+    assert out["oi_level_90d_z"].dropna().between(-1, 1).all()
+    assert out["oi_chg_1d"].iloc[500] == pytest.approx(df["sum_open_interest"].iloc[500] / df["sum_open_interest"].iloc[494] - 1)
+    assert out["oi_capitulation_1d"].iloc[497] > 0.05          # both down → positive magnitude
+    assert out["oi_new_longs_1d"].iloc[497] == 0.0
+    assert (out["oi_capitulation_1d"] >= 0).all() and (out["oi_new_longs_1d"] >= 0).all()
+    with pytest.raises(ValueError, match="sum_open_interest"):
+        add_probe_features(pd.DataFrame({"close": [1.0], "funding_rate": [0.0]}), ["oi_chg_1d"], "4h")
+    assert required_sources(["oi_chg_1d", "funding_cum_3d"]) == {"oi", "funding"}

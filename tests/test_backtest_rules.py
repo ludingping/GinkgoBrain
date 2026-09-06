@@ -125,3 +125,30 @@ def test_run_rules_on_slice_gate_only_matches_const_when_gate_always_on() -> Non
     assert g["total_return"] == pytest.approx(c["total_return"])
     reduce_label = [k for k in res if k.startswith("gate_reduce")][0]
     assert res[reduce_label]["trades"] > g["trades"]
+
+
+def test_gate_reduce_and_condition() -> None:
+    df = pd.DataFrame({"sig_x": [0.9, 0.9, 0.9, 0.1], "dist": [0.02, 0.2, np.nan, 0.02]})
+    gate = np.array([True, True, True, True])
+    sp = parse_rule("gate_reduce:signal=sig_x,thr=0.5,level=2,signal2=dist,thr2=0.1,side2=below")
+    act = make_act_fn(sp, df, gate)
+    # hit only when sig high AND dist below 0.1 (NaN never hits)
+    assert [act(None, _Env(i))[0] for i in range(4)] == [2, 4, 4, 4]
+    with pytest.raises(ValueError, match="signal2"):
+        parse_rule("gate_reduce:signal=sig_x,thr=0.5,level=2,thr2=0.1")
+
+
+def test_rule_contract_sources_sees_second_signal_and_probe_features() -> None:
+    specs = [parse_rule("gate_reduce:signal=funding_cum_3d_z,thr=0.5,level=2,signal2=dist_sma200,thr2=0.1,side2=below")]
+    assert rule_contract_sources(specs) == {"funding"}
+
+
+def test_add_rule_features_materialises_dist_and_probe_columns() -> None:
+    from scripts.backtest_rules import add_rule_features
+    full = _synthetic_4h()
+    full["funding_rate"] = 1e-4
+    bt = full.iloc[-400:].reset_index(drop=True)
+    specs = [parse_rule("gate_reduce:signal=funding_cum_3d_z,thr=0.5,level=2,signal2=dist_sma200,thr2=0.1,side2=below")]
+    out = add_rule_features(full, bt, specs, "4h")
+    assert "dist_sma200" in out.columns and "funding_cum_3d_z" in out.columns
+    assert out["dist_sma200"].notna().all()          # 320 days of history → SMA warmed

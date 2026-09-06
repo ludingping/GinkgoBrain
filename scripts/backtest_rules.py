@@ -16,9 +16,11 @@ Usage:
 
 Rule grammar:  name[:k=v,k=v,...]
     gate_only                       100 % when the UTC daily SMA200 gate is on, else 0 %
-    gate_reduce:signal=,thr=,level=[,side=above|below]
-                                    gate on & signal (>|<) thr → `level` (0-4 = 0/25/50/75/100 %),
-                                    gate on otherwise → 100 %, gate off → 0 %
+    gate_reduce:signal=,thr=,level=[,side=above|below][,signal2=,thr2=,side2=]
+                                    gate on & signal (>|<) thr [& signal2 (>|<) thr2] → `level`
+                                    (0-4 = 0/25/50/75/100 %), gate on otherwise → 100 %, gate off → 0 %
+                                    signals may be pool columns, raw contract columns, probe features
+                                    (funding_cum_3d_z, …) or dist_sma200
     const:level=                    fixed target (sanity)
 Outputs reports/backtest_rules_<tag>.md + .json (one table per period).
 """
@@ -42,8 +44,11 @@ from envs.signal_layered_env import (                                  # noqa: E
     SignalLayeredEnv, TARGET_POSITION, load_signal_list,
 )
 from scripts.backtest_signal_layered import (                          # noqa: E402
-    _ALLOWED_ENV_KEYS, buy_and_hold_metrics, daily_sma_gate, load_data,
-    run_backtest, summarise,
+    _ALLOWED_ENV_KEYS, buy_and_hold_metrics, daily_sma_distance, daily_sma_gate,
+    load_data, run_backtest, summarise,
+)
+from scripts.signal_ic_probe import (                                  # noqa: E402
+    DIST_COL, PROBE_FEATURES, add_probe_features, required_sources as probe_required_sources,
 )
 from utils.data_loader import (                                        # noqa: E402
     CONTRACT_SOURCE_COLS, required_contract_sources,
@@ -76,6 +81,10 @@ class RuleSpec:
     def signal(self) -> str | None:
         return self.params.get("signal")
 
+    @property
+    def signals(self) -> list[str]:
+        return [self.params[k] for k in ("signal", "signal2") if k in self.params]
+
 
 _RULE_NAMES = {"gate_only", "gate_reduce", "const"}
 
@@ -107,6 +116,12 @@ def parse_rule(text: str) -> RuleSpec:
         params.setdefault("side", "above")
         if params["side"] not in ("above", "below"):
             raise ValueError("gate_reduce side must be 'above' or 'below'")
+        if "signal2" in params or "thr2" in params:
+            if {"signal2", "thr2"} - params.keys():
+                raise ValueError("gate_reduce AND-condition needs both signal2= and thr2=")
+            params.setdefault("side2", "above")
+            if params["side2"] not in ("above", "below"):
+                raise ValueError("gate_reduce side2 must be 'above' or 'below'")
     if name == "const" and "level" not in params:
         raise ValueError("const needs level=")
     if "level" in params and not (isinstance(params["level"], int) and 0 <= params["level"] <= 4):
@@ -123,21 +138,27 @@ def make_act_fn(spec: RuleSpec, bt_df: pd.DataFrame, gate: np.ndarray):
     if spec.name == "gate_only":
         return lambda obs, env: ((FULL if gate[env.current_step] else FLAT), None)
 
-    # gate_reduce
-    col = spec.params["signal"]
-    if col not in bt_df.columns:
-        raise ValueError(f"rule signal '{col}' not in data columns")
-    x = bt_df[col].to_numpy(dtype=float)
-    thr = float(spec.params["thr"])
+    # gate_reduce (optionally AND-ed with a second condition)
+    def _cond(sig_key: str, thr_key: str, side_key: str):
+        col = spec.params[sig_key]
+        if col not in bt_df.columns:
+            raise ValueError(f"rule signal '{col}' not in data columns")
+        x = bt_df[col].to_numpy(dtype=float)
+        thr = float(spec.params[thr_key])
+        above = spec.params[side_key] == "above"
+        # NaN (e.g. SMA warmup) never satisfies a condition
+        return (x > thr) if above else (x < thr)
+
+    hit = _cond("signal", "thr", "side")
+    if "signal2" in spec.params:
+        hit = hit & _cond("signal2", "thr2", "side2")
     lvl = spec.params["level"]
-    above = spec.params["side"] == "above"
 
     def act(obs, env):
         i = env.current_step
         if not gate[i]:
             return FLAT, None
-        hit = (x[i] > thr) if above else (x[i] < thr)
-        return (lvl if hit else FULL), None
+        return (lvl if hit[i] else FULL), None
 
     return act
 
@@ -147,12 +168,20 @@ def rule_contract_sources(specs: list[RuleSpec]) -> set[str]:
     raw_to_src = {c: src for src, cols in CONTRACT_SOURCE_COLS.items() for c in cols}
     out: set[str] = set()
     for sp in specs:
-        col = sp.signal
-        if col is None:
-            continue
-        if col in raw_to_src:
-            out.add(raw_to_src[col])
-        out |= required_contract_sources([col])
+        for col in sp.signals:
+            if col in raw_to_src:
+                out.add(raw_to_src[col])
+            out |= probe_required_sources([col])
+    return out
+
+
+def add_rule_features(full_df: pd.DataFrame, bt_df: pd.DataFrame, specs: list[RuleSpec],
+                      timeframe: str) -> pd.DataFrame:
+    """Materialise probe features / dist_sma200 referenced by the rules onto bt_df."""
+    names = [c for sp in specs for c in sp.signals if c in PROBE_FEATURES]
+    out = add_probe_features(bt_df, names, timeframe)
+    if any(DIST_COL in sp.signals for sp in specs):
+        out[DIST_COL] = daily_sma_distance(full_df, bt_df)
     return out
 
 
@@ -194,9 +223,11 @@ def run_rules_on_slice(
     signal_cols: list[str],
     env_cfg: dict,
     periods_per_year: int,
+    timeframe: str = "4h",
 ) -> dict[str, dict]:
     """Roll every rule (plus buy_and_hold) through the env on one slice."""
     gate = daily_sma_gate(full_df, bt_df)
+    bt_df = add_rule_features(full_df, bt_df, specs, timeframe)
     out: dict[str, dict] = {
         "buy_and_hold": enrich(buy_and_hold_metrics(bt_df, signal_cols, env_cfg, periods_per_year),
                                periods_per_year),
@@ -286,7 +317,8 @@ def main() -> int:
         print(f"\n== period {name}: {start} → {end} ==")
         full_df, bt_df = load_data(cfg, start, end, with_contracts=with_contracts,
                                    prefix_rows=prefix_rows, required_contracts=required)
-        res = run_rules_on_slice(specs, full_df, bt_df, signal_cols, env_cfg, periods_per_year)
+        res = run_rules_on_slice(specs, full_df, bt_df, signal_cols, env_cfg, periods_per_year,
+                                 timeframe=c.get("timeframe", "4h"))
         label = f"{bt_df['timestamp'].iloc[prefix_rows]} → {bt_df['timestamp'].iloc[-1]}"
         all_results[name] = {"period": label, "results": res}
         lines += [f"## {name} — {label}", ""] + format_table(res) + [""]

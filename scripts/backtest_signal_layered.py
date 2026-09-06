@@ -101,6 +101,22 @@ def daily_sma_gate(full_df: pd.DataFrame, bt_df: pd.DataFrame,
     return ok_daily.reindex(last_closed_day, fill_value=False).to_numpy(dtype=bool)
 
 
+def daily_sma_distance(full_df: pd.DataFrame, bt_df: pd.DataFrame,
+                       sma_days: int = GATE_SMA_DAYS) -> np.ndarray:
+    """Per-bar `close / SMA(sma_days) − 1` of the last *closed* UTC day, aligned to
+    bt_df exactly like :func:`daily_sma_gate` (NaN while the SMA is warming up).
+    Trend-strength proxy for gate × signal interaction rules."""
+    ts = pd.DatetimeIndex(full_df["timestamp"]).tz_convert("UTC")
+    close = pd.Series(full_df["close"].to_numpy(), index=ts)
+    daily = close.resample("1D", closed="left", label="left").last()
+    dist = daily / daily.rolling(sma_days).mean() - 1.0
+
+    bt_ts = pd.DatetimeIndex(bt_df["timestamp"]).tz_convert("UTC")
+    bar = pd.Series(bt_ts).diff().dropna().mode().iloc[0]
+    last_closed_day = (bt_ts + bar).floor("D") - pd.Timedelta(days=1)
+    return dist.reindex(last_closed_day).to_numpy(dtype=float)
+
+
 def gated(act_fn, gate: np.ndarray):
     """Wrap an act_fn so the target is forced to 0 % when the gate is off.
 

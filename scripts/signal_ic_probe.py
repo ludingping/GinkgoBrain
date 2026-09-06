@@ -39,14 +39,15 @@ from sklearn.metrics import roc_auc_score
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.backtest_signal_layered import daily_sma_gate               # noqa: E402
+from scripts.backtest_signal_layered import daily_sma_distance, daily_sma_gate  # noqa: E402
 from scripts.signal_linear_baseline import load_df_from_config           # noqa: E402
 from utils.data_loader import required_contract_sources                  # noqa: E402
 from utils.indicators import add_indicators                              # noqa: E402
-from utils.signals import add_contract_signals, add_signals              # noqa: E402
+from utils.signals import add_contract_signals, add_signals, znorm       # noqa: E402
 from utils.splits import TimeFold, time_folds                            # noqa: E402
 
 IC_MIN = 0.03
+N_MIN = 300              # rows per fold below which an IC is not evidence
 TS_COL = "timestamp"
 DECILE = 0.10
 
@@ -70,22 +71,95 @@ def funding_rank(df: pd.DataFrame, timeframe: str, span: str) -> pd.Series:
     return fr.rolling(w, min_periods=max(2, w // 4)).rank(pct=True)
 
 
+def _oi(df: pd.DataFrame) -> pd.Series:
+    return pd.to_numeric(df["sum_open_interest"], errors="coerce")
+
+
+def oi_level_z(df: pd.DataFrame, timeframe: str, span: str = "90D") -> pd.Series:
+    """H2a: OI (base units) z-score vs its rolling `span` window, in [-1, 1] (cap 3)."""
+    return znorm(_oi(df), window=_bars(span, timeframe))
+
+
+def oi_change(df: pd.DataFrame, timeframe: str, span: str = "1D") -> pd.Series:
+    """OI pct change over `span` (raw)."""
+    return _oi(df).pct_change(_bars(span, timeframe))
+
+
+def oi_capitulation(df: pd.DataFrame, timeframe: str, span: str = "1D") -> pd.Series:
+    """H2b: forced long unwind proxy = |OI drop| when both OI and price fell over `span`, else 0.
+    Positive values = capitulation; predicted to precede a rebound (IC > 0)."""
+    k = _bars(span, timeframe)
+    d_oi = _oi(df).pct_change(k)
+    ret = np.log(df["close"] / df["close"].shift(k))
+    both_down = (d_oi < 0) & (ret < 0)
+    return (-d_oi).where(both_down, 0.0)
+
+
+def oi_new_longs(df: pd.DataFrame, timeframe: str, span: str = "1D") -> pd.Series:
+    """H2c: OI up & price up over `span` → OI increase, else 0 (trend-continuation confirmation)."""
+    k = _bars(span, timeframe)
+    d_oi = _oi(df).pct_change(k)
+    ret = np.log(df["close"] / df["close"].shift(k))
+    return d_oi.where((d_oi > 0) & (ret > 0), 0.0)
+
+
 PROBE_FEATURES = {
+    # ── H2 (open interest) ──
+    "oi_level_90d_z": lambda df, tf: oi_level_z(df, tf, "90D"),
+    "oi_chg_1d": lambda df, tf: oi_change(df, tf, "1D"),
+    "oi_capitulation_1d": lambda df, tf: oi_capitulation(df, tf, "1D"),
+    "oi_new_longs_1d": lambda df, tf: oi_new_longs(df, tf, "1D"),
+    # ── H1 (funding) ──
     "funding_cum_3d": lambda df, tf: funding_cum(df, tf, "3D"),
     "funding_cum_7d": lambda df, tf: funding_cum(df, tf, "7D"),
     "funding_rank_90d": lambda df, tf: funding_rank(df, tf, "90D"),
+    # bounded [-1, 1] versions (rolling 200-bar z, cap 3) — usable as rule thresholds
+    "funding_cum_3d_z": lambda df, tf: znorm(funding_cum(df, tf, "3D"), window=200),
+    "funding_cum_7d_z": lambda df, tf: znorm(funding_cum(df, tf, "7D"), window=200),
 }
-_PROBE_SOURCE = {name: "funding" for name in PROBE_FEATURES}
+_PROBE_SOURCE = {name: ("oi" if name.startswith("oi_") else "funding") for name in PROBE_FEATURES}
+_PROBE_RAW_COL = {"oi": "sum_open_interest", "funding": "funding_rate"}
+DIST_COL = "dist_sma200"          # close / UTC-daily SMA200 − 1 of the last closed day
 
 
 def add_probe_features(df: pd.DataFrame, names: list[str], timeframe: str) -> pd.DataFrame:
+    """Add requested probe-only features (and `dist_sma200` when referenced)."""
     out = df.copy()
     for n in names:
         if n in PROBE_FEATURES:
-            if "funding_rate" not in out.columns:
-                raise ValueError(f"probe feature '{n}' needs a funding_rate column")
+            raw = _PROBE_RAW_COL[_PROBE_SOURCE[n]]
+            if raw not in out.columns:
+                raise ValueError(f"probe feature '{n}' needs a {raw} column")
             out[n] = PROBE_FEATURES[n](out, timeframe)
+        elif n == DIST_COL and DIST_COL not in out.columns:
+            out[DIST_COL] = daily_sma_distance(out, out)
     return out
+
+
+_WHERE_OPS = {"<=": np.less_equal, ">=": np.greater_equal, "<": np.less, ">": np.greater}
+
+
+def parse_where(text: str) -> tuple[str, str, float]:
+    """`col<0.1` / `col>=-0.05` → (col, op, value)."""
+    for op in ("<=", ">=", "<", ">"):          # two-char ops first
+        if op in text:
+            col, _, val = text.partition(op)
+            col, val = col.strip(), val.strip()
+            if not col or not val:
+                break
+            return col, op, float(val)
+    raise ValueError(f"bad --where '{text}' (expected col<op>value, op in {list(_WHERE_OPS)})")
+
+
+def where_mask(df: pd.DataFrame, clauses: list[tuple[str, str, float]]) -> np.ndarray:
+    """AND of the clauses; NaN never satisfies a clause."""
+    m = np.ones(len(df), dtype=bool)
+    for col, op, val in clauses:
+        if col not in df.columns:
+            raise ValueError(f"--where column '{col}' not in data")
+        x = df[col].to_numpy(dtype=float)
+        m &= _WHERE_OPS[op](x, val) & ~np.isnan(x)
+    return m
 
 
 def required_sources(signals: list[str]) -> set[str]:
@@ -135,10 +209,16 @@ class FoldStat:
     auc: float
 
 
-def verdict(ics: list[float], ic_min: float = IC_MIN) -> tuple[bool, str]:
-    """(pass, reason) per §5: |IC| ≥ ic_min on all folds, same sign, last fold agrees."""
+def verdict(ics: list[float], ic_min: float = IC_MIN,
+            ns: list[int] | None = None, n_min: int = N_MIN) -> tuple[bool, str]:
+    """(pass, reason) per §5: |IC| ≥ ic_min on all folds, same sign, last fold agrees,
+    and every fold has at least `n_min` rows (small filtered subsets are not evidence)."""
     if not ics or any(np.isnan(ics)):
         return False, "nan"
+    if ns is not None:
+        thin = [k + 1 for k, n in enumerate(ns) if n < n_min]
+        if thin:
+            return False, f"n<{n_min} on fold {thin}"
     signs = {np.sign(x) for x in ics}
     if len(signs) != 1 or 0 in signs:
         return False, "sign flips"
@@ -171,25 +251,26 @@ def evaluate_signal(
 
 def format_horizon_table(stats: dict[str, list[FoldStat]], ic_min: float = IC_MIN) -> list[str]:
     n_folds = max(len(v) for v in stats.values())
-    head = "| signal | " + " | ".join(f"IC f{k + 1}" for k in range(n_folds)) + \
+    head = "| signal | " + " | ".join(f"IC f{k + 1} (n)" for k in range(n_folds)) + \
            " | IC mean | AUC last | spread last (bps) | verdict |"
     lines = [head, "|---|" + "---:|" * (n_folds + 3) + ":--|"]
     for name, fs in stats.items():
         ics = [x.ic for x in fs]
-        ok, why = verdict(ics, ic_min)
-        cells = " | ".join(f"{x.ic:+.4f}" for x in fs)
+        ok, why = verdict(ics, ic_min, ns=[x.n for x in fs])
+        cells = " | ".join(f"{x.ic:+.4f} ({x.n})" for x in fs)
         lines.append(f"| `{name}` | {cells} | {np.nanmean(ics):+.4f} | {fs[-1].auc:.4f} | "
                      f"{fs[-1].spread_bps:+.1f} | {'**PASS**' if ok else 'FAIL (' + why + ')'} |")
     return lines
 
 
-def build_frame(config: Path, signals: list[str]) -> tuple[pd.DataFrame, str]:
-    req = required_sources(signals)
+def build_frame(config: Path, signals: list[str],
+                extra_features: list[str] = ()) -> tuple[pd.DataFrame, str]:
+    req = required_sources(list(signals) + list(extra_features))
     df_tf, tf = load_df_from_config(config, with_contracts=bool(req), required_contracts=req)
     df = add_indicators(df_tf)
     df = add_signals(df)
     df = add_contract_signals(df, timeframe=tf)
-    df = add_probe_features(df, signals, tf)
+    df = add_probe_features(df, signals + extra_features, tf)
     missing = [s for s in signals if s not in df.columns]
     if missing:
         raise ValueError(f"unknown signals {missing}; known probe features: {sorted(PROBE_FEATURES)}")
@@ -207,19 +288,27 @@ def main() -> int:
     ap.add_argument("--gate-on", action="store_true",
                     help="evaluate only bars where the UTC daily SMA200 gate is on "
                          "(the regime in which a gate × signal rule can act)")
+    ap.add_argument("--where", action="append", default=[],
+                    help="row filter col<op>value (AND-ed, repeatable), e.g. dist_sma200<0.10")
     args = ap.parse_args()
     horizons = args.horizon or [6, 18]
+    clauses = [parse_where(w) for w in args.where]
 
-    df, tf = build_frame(args.config, args.signal)
-    mask = daily_sma_gate(df, df) if args.gate_on else None
+    df, tf = build_frame(args.config, args.signal, extra_features=[c for c, _, _ in clauses])
+    mask = None
+    if args.gate_on:
+        mask = daily_sma_gate(df, df)
+    if clauses:
+        wm = where_mask(df, clauses)
+        mask = wm if mask is None else (mask & wm)
     if mask is not None:
-        print(f"[gate-on] {int(mask.sum()):,} / {len(mask):,} bars")
+        print(f"[rows] {int(mask.sum()):,} / {len(mask):,} bars after gate/where filters")
     lines = [f"# Signal IC probe — {args.config.name}", "",
              f"- Generated: `{datetime.now().isoformat(timespec='seconds')}`",
              f"- Timeframe **{tf}**, bars {len(df):,}, {df[TS_COL].iloc[0]} → {df[TS_COL].iloc[-1]}",
              f"- Folds: {args.cv_splits} expanding time folds (validation windows only; no fitting)",
-             f"- Rows: {'gate-on bars only (' + str(int(mask.sum())) + ')' if mask is not None else 'all bars'}",
-             f"- Pass: |IC| ≥ {args.ic_min} on every fold, same sign, latest fold agrees. "
+             f"- Rows: {'filtered (' + str(int(mask.sum())) + ') — gate_on=' + str(args.gate_on) + ' where=' + ' & '.join(args.where) if mask is not None else 'all bars'}",
+             f"- Pass: |IC| ≥ {args.ic_min} on every fold, same sign, latest fold agrees, n ≥ {N_MIN} per fold. "
              f"k-bar targets overlap, so IC magnitude is the criterion, not p-values.", ""]
     for h in horizons:
         folds = time_folds(df[TS_COL], args.cv_splits, embargo=h * pd.Timedelta(tf))
