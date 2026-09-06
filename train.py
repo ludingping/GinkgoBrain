@@ -5,6 +5,9 @@ import pandas as pd
 
 from utils import load_stock_data, load_crypto_data, add_indicators, add_multi_timeframe_indicators
 from utils.data_loader import merge_contract_data
+from utils.data_loader import (  # noqa: E402
+    check_contract_coverage, neutral_fill_contract_columns, required_contract_sources,
+)
 from utils.db import (
     read_funding,
     read_liquidation_agg,
@@ -188,13 +191,17 @@ def main():
     trainer.save()
 
 
-def _load_crypto_df(c: dict, *, with_contracts: bool = False) -> pd.DataFrame:
+def _load_crypto_df(
+    c: dict, *, with_contracts: bool = False, required_contracts=frozenset(),
+) -> pd.DataFrame:
     """Shared crypto DB → DataFrame loader used by both paradigms.
 
     Args:
-        with_contracts: True 时跨库 join funding/OI/liquidation 到 OHLCV 并立即
-            对合约列 fillna(0) —— 避免下游 add_indicators.dropna() 误删合约起点
-            前的 OHLCV 行（与 signal_linear_baseline.load_df_from_config 对称）。
+        with_contracts: True 时跨库 join funding/OI/liquidation 到 OHLCV；先做覆盖
+            检查（required_contracts 中的数据源覆盖 <95% 直接报错），再对合约列
+            中性填充 —— 避免下游 add_indicators.dropna() 误删合约起点前的 OHLCV 行
+            （与 signal_linear_baseline.load_df_from_config 对称）。
+        required_contracts: 信号池需要的数据源集合（required_contract_sources）。
     """
     start_date = c.get("start_date", "2018-01-01 00:00:00")
     end_date = c.get("end_date", "2026-04-13 00:00:00")
@@ -240,14 +247,8 @@ def _load_crypto_df(c: dict, *, with_contracts: bool = False) -> pd.DataFrame:
         df_tf = merge_contract_data(
             df_tf, df_funding=df_funding, df_oi=df_oi, df_liq=df_liq,
         )
-        for col in (
-            "funding_rate", "sum_open_interest", "sum_open_interest_value",
-            "liq_long_usd", "liq_short_usd", "liq_total_usd",
-        ):
-            if col in df_tf.columns:
-                df_tf[col] = df_tf[col].fillna(0.0)
-        if "funding_origin" in df_tf.columns:
-            df_tf["funding_origin"] = df_tf["funding_origin"].fillna("")
+        check_contract_coverage(df_tf, required=required_contracts)
+        df_tf = neutral_fill_contract_columns(df_tf)
 
     return df_tf
 
@@ -278,10 +279,13 @@ def _train_signal_layered(cfg, train_cfg, env_cfg, backend, args) -> None:
         print("[train] candidate pool contains contract signals → enabling cross-db merge")
 
     c = cfg["crypto"]
-    df_tf = _load_crypto_df(c, with_contracts=needs_contracts)
+    df_tf = _load_crypto_df(
+        c, with_contracts=needs_contracts,
+        required_contracts=required_contract_sources(signal_cols),
+    )
     df = add_indicators(df_tf)
     df = add_signals(df)
-    df = add_contract_signals(df)
+    df = add_contract_signals(df, timeframe=c.get("timeframe", "1d"))
 
     missing = [s for s in signal_cols if s not in df.columns]
     if missing:
@@ -369,10 +373,13 @@ def _train_gbdt(cfg: dict, args) -> None:
         print("[train] candidate pool contains contract signals → enabling cross-db merge")
 
     c = cfg["crypto"]
-    df_tf = _load_crypto_df(c, with_contracts=needs_contracts)
+    df_tf = _load_crypto_df(
+        c, with_contracts=needs_contracts,
+        required_contracts=required_contract_sources(signal_cols),
+    )
     df = add_indicators(df_tf)
     df = add_signals(df)
-    df = add_contract_signals(df)
+    df = add_contract_signals(df, timeframe=c.get("timeframe", "1d"))
 
     missing = [s for s in signal_cols if s not in df.columns]
     if missing:

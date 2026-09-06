@@ -1,0 +1,66 @@
+{
+  "config": "config/stage2_4h_signal_v2.yaml",
+  "rules": [
+    "gate_only"
+  ],
+  "periods": {
+    "val": {
+      "period": "2024-10-01 00:00:00+08:00 \u2192 2026-04-12 20:00:00+08:00",
+      "results": {
+        "buy_and_hold": {
+          "total_return": 0.11550431530367877,
+          "max_drawdown": -0.49836971788955065,
+          "sharpe": 0.15671332160090468,
+          "trades": 1,
+          "steps": 3353,
+          "mean_reward": NaN,
+          "years": 1.5310502283105023,
+          "ann_return": 0.07400346080136844,
+          "calmar": 0.1484910863259336,
+          "trades_per_year": 0.6531464360274382
+        },
+        "gate_only": {
+          "total_return": 0.17596222862309308,
+          "max_drawdown": -0.3394545919246935,
+          "sharpe": 0.30383311316233236,
+          "trades": 19,
+          "steps": 3353,
+          "mean_reward": -6.340459304944318e-05,
+          "years": 1.5310502283105023,
+          "ann_return": 0.11167331402700342,
+          "calmar": 0.32897865188336484,
+          "trades_per_year": 12.409782284521324
+        }
+      }
+    },
+    "test": {
+      "period": "2026-04-13 00:00:00+08:00 \u2192 2026-09-03 20:00:00+08:00",
+      "results": {
+        "buy_and_hold": {
+          "total_return": 0.14324526216663203,
+          "max_drawdown": -0.29253580430835613,
+          "sharpe": 0.8996001717320522,
+          "trades": 1,
+          "steps": 863,
+          "mean_reward": NaN,
+          "years": 0.39406392694063924,
+          "ann_return": 0.4045526282509202,
+          "calmar": 1.3829166286410854,
+          "trades_per_year": 2.5376593279258404
+        },
+        "gate_only": {
+          "total_return": 0.1720905479053152,
+          "max_drawdown": -0.04546329322839526,
+          "sharpe": 2.929479256487635,
+          "trades": 0,
+          "steps": 863,
+          "mean_reward": 0.0001818694177631092,
+          "years": 0.39406392694063924,
+          "ann_return": 0.4962354502997903,
+          "calmar": 10.9150792884017,
+          "trades_per_year": 0.0
+        }
+      }
+    }
+  }
+}

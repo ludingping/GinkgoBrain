@@ -36,6 +36,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from agents.ppo_shared import resample_ohlcv  # noqa: E402
 from utils.data_loader import merge_contract_data  # noqa: E402
+from utils.data_loader import (  # noqa: E402
+    check_contract_coverage, neutral_fill_contract_columns,
+)
 from utils.db import (  # noqa: E402
     read_funding,
     read_liquidation_agg,
@@ -74,16 +77,12 @@ def load_full_df(symbol: str, timeframe: str, start: str, end: str) -> pd.DataFr
             sub_ts = sub_ts.dt.tz_localize("UTC")
         sub["timestamp"] = sub_ts.dt.tz_convert("Asia/Shanghai")
     df_tf = merge_contract_data(df_tf, df_funding=df_funding, df_oi=df_oi, df_liq=df_liq)
-    for col in ("funding_rate", "sum_open_interest", "sum_open_interest_value",
-                "liq_long_usd", "liq_short_usd", "liq_total_usd"):
-        if col in df_tf.columns:
-            df_tf[col] = df_tf[col].fillna(0.0)
-    if "funding_origin" in df_tf.columns:
-        df_tf["funding_origin"] = df_tf["funding_origin"].fillna("")
+    check_contract_coverage(df_tf, required=set())
+    df_tf = neutral_fill_contract_columns(df_tf)
 
     df = add_indicators(df_tf)
     df = add_signals(df)
-    df = add_contract_signals(df)
+    df = add_contract_signals(df, timeframe=timeframe)
     df = df.iloc[SIGNAL_WARMUP_WINDOW:].reset_index(drop=True)
     return df
 

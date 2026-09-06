@@ -173,3 +173,123 @@ def merge_contract_data(
         base = pd.merge_asof(base, liq, on="timestamp", direction="backward")
 
     return base
+
+
+# =============================================================================
+# 合约数据覆盖检查（2026-09-06）
+#
+# merge_contract_data 在合约数据起点之前留 NaN；此前四个脚本各自静默 fillna(0)，
+# 导致 4h v2 筛选时 6 个合约信号"训练期全零"被剔除而无人察觉。规则：
+#   1. 先 check_contract_coverage —— 打印每个数据源的覆盖区间/比例；
+#      下游信号需要的数据源（required）覆盖 < min_coverage 直接报错。
+#   2. 通过后再 neutral_fill_contract_columns —— 只为防 add_indicators 的全局
+#      dropna 误删起点前的 OHLCV 行；残余 ≤5% 的填零落在 warmup 段。
+# =============================================================================
+
+CONTRACT_SOURCE_COLS: dict[str, tuple[str, ...]] = {
+    "funding": ("funding_rate",),
+    "oi": ("sum_open_interest", "sum_open_interest_value"),
+    "liq": ("liq_long_usd", "liq_short_usd", "liq_total_usd"),
+}
+_CONTRACT_SIGNAL_PREFIX = {"sig_funding_": "funding", "sig_oi_": "oi", "sig_liq_": "liq"}
+DEFAULT_MIN_CONTRACT_COVERAGE = 0.95
+
+
+class ContractCoverageError(ValueError):
+    """A contract data source required by the signal pool is missing or too sparse."""
+
+
+def required_contract_sources(signal_cols) -> set[str]:
+    """Map a signal list to the contract sources it needs (``funding`` / ``oi`` / ``liq``)."""
+    out: set[str] = set()
+    for s in signal_cols:
+        for prefix, src in _CONTRACT_SIGNAL_PREFIX.items():
+            if str(s).startswith(prefix):
+                out.add(src)
+    return out
+
+
+def contract_coverage(df: pd.DataFrame, ts_col: str = "timestamp") -> pd.DataFrame:
+    """Per-source coverage of merged contract columns.
+
+    Returns a DataFrame indexed by source with columns ``present`` (bool),
+    ``first_ts`` / ``last_ts`` (first/last row with a non-NaN primary column,
+    NaT if absent) and ``coverage`` (non-NaN fraction of rows, 0.0 if absent).
+    """
+    n = len(df)
+    rows = []
+    for src, cols in CONTRACT_SOURCE_COLS.items():
+        primary = cols[0]
+        if primary not in df.columns or n == 0:
+            rows.append((src, False, pd.NaT, pd.NaT, 0.0, 0))
+            continue
+        ok = df[primary].notna()
+        cnt = int(ok.sum())
+        if cnt == 0:
+            rows.append((src, False, pd.NaT, pd.NaT, 0.0, 0))
+            continue
+        ts = df.loc[ok, ts_col] if ts_col in df.columns else pd.Series(df.index[ok])
+        # NaN rows *after* the first observation: merge_asof(backward) carries the
+        # last value forward, so these are real holes, not the leading warmup.
+        interior = int((~ok.to_numpy())[ok.to_numpy().argmax():].sum())
+        rows.append((src, True, ts.iloc[0], ts.iloc[-1], cnt / n, interior))
+    return pd.DataFrame(
+        rows, columns=["source", "present", "first_ts", "last_ts", "coverage", "interior_gaps"],
+    ).set_index("source")
+
+
+def check_contract_coverage(
+    df: pd.DataFrame,
+    required,
+    *,
+    min_coverage: float = DEFAULT_MIN_CONTRACT_COVERAGE,
+    ts_col: str = "timestamp",
+    log=print,
+) -> pd.DataFrame:
+    """Log coverage of every contract source; raise if a *required* one is below threshold.
+
+    ``required`` is a collection of source names (see :func:`required_contract_sources`).
+    Sources not in ``required`` are reported only — e.g. liquidation has no history
+    before 2026-04 and must not block a funding-only run.
+
+    A required source fails if its coverage is below ``min_coverage`` **or** it has
+    any NaN after its first observation: the subsequent neutral fill is only
+    harmless for the leading (warmup) prefix, never for holes inside the window.
+    """
+    cov = contract_coverage(df, ts_col=ts_col)
+    required = set(required)
+    for src, r in cov.iterrows():
+        tag = "required" if src in required else "optional"
+        if r["present"]:
+            gaps = f"  interior_gaps={int(r['interior_gaps'])}" if r["interior_gaps"] else ""
+            log(f"[contracts] {src:8s} {tag:8s} coverage={r['coverage']:6.1%}  "
+                f"{r['first_ts']} → {r['last_ts']}{gaps}")
+        else:
+            log(f"[contracts] {src:8s} {tag:8s} ABSENT")
+    bad = []
+    for src in sorted(required):
+        r = cov.loc[src]
+        if not r["present"]:
+            bad.append(f"{src}: absent")
+        elif r["coverage"] < min_coverage:
+            bad.append(f"{src}: coverage {r['coverage']:.1%} < {min_coverage:.0%}")
+        elif r["interior_gaps"]:
+            bad.append(f"{src}: {int(r['interior_gaps'])} NaN rows after first observation")
+    if bad:
+        raise ContractCoverageError(
+            "contract data too sparse for the signal pool — " + "; ".join(bad)
+            + ". Backfill the source (Spider backfill_* scripts) or drop the signals."
+        )
+    return cov
+
+
+def neutral_fill_contract_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with NaN contract columns set to neutral (0.0 / '')."""
+    out = df.copy()
+    for cols in CONTRACT_SOURCE_COLS.values():
+        for col in cols:
+            if col in out.columns:
+                out[col] = out[col].fillna(0.0)
+    if "funding_origin" in out.columns:
+        out["funding_origin"] = out["funding_origin"].fillna("")
+    return out

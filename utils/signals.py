@@ -220,6 +220,35 @@ CONTRACT_SIGNAL_COLS = [
 BARS_PER_HOUR_5MIN = 12
 BARS_PER_DAY_5MIN = 288
 
+# 时间计价的窗口（与 bar 数无关）。znorm 窗口（200/100 bars）保持按 bar 计数，
+# 与 22 个技术信号的约定一致；只有下面三个"按小时/天定义"的窗口随 timeframe 换算。
+_FUNDING_MEAN_SPAN = pd.Timedelta("1D")    # sig_funding_trend: 24h 均值
+_OI_ROLL_SPAN = pd.Timedelta("1h")          # sig_oi_change_zscore: 1h 平滑
+_LIQ_EPS_SPAN = pd.Timedelta("8h")          # sig_liq_imbalance: ε 基准窗口（96 × 5min）
+
+
+def contract_signal_windows(timeframe: str) -> dict[str, int]:
+    """把合约信号的时间计价窗口换算成给定 timeframe 的 bar 数（至少 1 根）。
+
+    ``"5min"`` 复现旧默认（288 / 12 / 96）；``"4h"`` → 6 / 1 / 2。
+    不带 timeframe 的调用路径不经过此函数，行为不变。
+    """
+    try:
+        bar = pd.Timedelta(str(timeframe))
+    except ValueError as e:
+        raise ValueError(f"Unknown timeframe '{timeframe}' for contract signals") from e
+    if bar <= pd.Timedelta(0):
+        raise ValueError(f"Unknown timeframe '{timeframe}' for contract signals")
+
+    def _bars(span: pd.Timedelta) -> int:
+        return max(1, int(span / bar))
+
+    return {
+        "funding_mean": _bars(_FUNDING_MEAN_SPAN),
+        "oi_roll": _bars(_OI_ROLL_SPAN),
+        "liq_eps": _bars(_LIQ_EPS_SPAN),
+    }
+
 
 def compute_sig_funding_current(
     funding_rate: pd.Series, window: int = 200,
@@ -294,9 +323,15 @@ def compute_sig_liq_imbalance(
     return out
 
 
-def add_contract_signals(df: pd.DataFrame) -> pd.DataFrame:
+def add_contract_signals(
+    df: pd.DataFrame, timeframe: str | None = None,
+) -> pd.DataFrame:
     """
     Append 6 contract-market signals to ``df``. Operates in-place on a copy.
+
+    ``timeframe`` (e.g. ``"4h"``) rescales the time-denominated windows via
+    :func:`contract_signal_windows`; ``None`` keeps the legacy 5min-bar
+    constants so existing callers (and Spider's synced copy) are unchanged.
 
     Required optional columns on ``df`` (any subset — missing ones mean the
     corresponding sig_* column is all-zero neutral):
@@ -308,20 +343,23 @@ def add_contract_signals(df: pd.DataFrame) -> pd.DataFrame:
     Warmup NaN filled with 0 (neutral), consistent with ``add_signals``.
     """
     df = df.copy()
-    n = len(df)
     zeros = pd.Series(0.0, index=df.index, dtype=float)
+    w = (
+        contract_signal_windows(timeframe) if timeframe is not None
+        else {"funding_mean": BARS_PER_DAY_5MIN, "oi_roll": BARS_PER_HOUR_5MIN, "liq_eps": 96}
+    )
 
     if "funding_rate" in df.columns:
         fr = pd.to_numeric(df["funding_rate"], errors="coerce")
         df["sig_funding_current"] = compute_sig_funding_current(fr)
-        df["sig_funding_trend"] = compute_sig_funding_trend(fr)
+        df["sig_funding_trend"] = compute_sig_funding_trend(fr, mean_window=w["funding_mean"])
     else:
         df["sig_funding_current"] = zeros
         df["sig_funding_trend"] = zeros
 
     if "sum_open_interest" in df.columns:
         oi = pd.to_numeric(df["sum_open_interest"], errors="coerce")
-        df["sig_oi_change_zscore"] = compute_sig_oi_change_zscore(oi)
+        df["sig_oi_change_zscore"] = compute_sig_oi_change_zscore(oi, roll=w["oi_roll"])
     else:
         df["sig_oi_change_zscore"] = zeros
 
@@ -331,7 +369,9 @@ def add_contract_signals(df: pd.DataFrame) -> pd.DataFrame:
         short_ = pd.to_numeric(df["liq_short_usd"], errors="coerce").fillna(0.0)
         df["sig_liq_long_zscore"] = compute_sig_liq_long_zscore(long_)
         df["sig_liq_short_zscore"] = compute_sig_liq_short_zscore(short_)
-        df["sig_liq_imbalance"] = compute_sig_liq_imbalance(long_, short_)
+        df["sig_liq_imbalance"] = compute_sig_liq_imbalance(
+            long_, short_, epsilon_window=w["liq_eps"],
+        )
     else:
         df["sig_liq_long_zscore"] = zeros
         df["sig_liq_short_zscore"] = zeros

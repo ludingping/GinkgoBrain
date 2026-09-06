@@ -87,7 +87,7 @@ def load_bars(cfg: dict, start: pd.Timestamp, end: pd.Timestamp | None) -> pd.Da
 
     df = add_indicators(df_tf)
     df = add_signals(df)
-    df = add_contract_signals(df)
+    df = add_contract_signals(df, timeframe=timeframe)
     return df.reset_index(drop=True)
 
 

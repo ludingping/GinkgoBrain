@@ -1,3 +1,63 @@
+# 趋势底座 + 持仓信号增量 · H1 资金费率（2026-09-06）
+
+设计全文：`GinkgoRoad/docs/GinkgoBrain/BTC4h-趋势底座-持仓信号增量-设计.md`（v0.1，待确认）
+
+决策：放弃价格波动 RL；目标 = 拿到 BTC 大部分上行、压缩回撤；`gate_only`（UTC 日线 SMA200）为底座，持仓数据做增量。
+数据实测：funding 2021-01 起完整；OI 仅 2026-04 起（需 Spider `backfill_oi --since 2021-01-01`）；爆仓仅 2026-04 起、无回填路径。
+⇒ 本期只开 H1（funding），H2（OI）等回填。
+
+## 待办
+
+- [x] 1. `utils/signals.py`：合约信号窗口 timeframe 感知（`add_contract_signals(df, timeframe=)`，5min 默认不变）；先写测试 RED
+- [x] 2. `utils/data_loader.py::check_contract_coverage`：覆盖 <95% 报错并打印区间，替代三处静默 `fillna(0)`；测试
+- [x] 3. `scripts/backtest_rules.py`：无模型规则回测器（`gate_only` / `gate×rule`），复现 gate_only val +17.6% / test +17.2% 作为回归基线
+- [x] 4. `scripts/signal_ic_probe.py`：每折 rank IC / 分位价差 / AUC，最近一折单列；合成数据测试
+- [x] 5. 跑 H1：funding_z200 / funding_1d_z / cum_3d / cum_7d / rank_90d × k∈{6,18} → `reports/h1_funding_ic_4h.md`
+- [-] 6. **跳过（H1 未通过，不进 L3）** H1 通过（|IC|≥0.03、三折同号、最近折不反号）→ 规则 `gate_on & funding_z200>2 → 0.5` 回测 vs gate_only → `reports/h1_funding_gate_rule_4h.md`
+- [x] 7. 审查小结 + lessons（见下）
+- [ ] 8. （用户侧，Spider 仓库）`uv run python -m ginkgo_spider.scripts.backfill_oi --symbols BTC/USDT --since 2021-01-01` → 覆盖 ≥95% 后开 H2
+
+
+## 审查（H1 资金费率，2026-09-06）
+
+数据：BTC/USDT 4h，2021-01→2026-09，predicted funding（premium_kline 重建，覆盖 100%）；目标 = 未来 6 根（1 天）/ 18 根（3 天）对数收益；
+3 个扩展时间折的**验证窗**（f1 2022-06→2023-11，f2 2023-11→2025-04，f3 2025-04→2026-09），不拟合，直接算 rank IC。
+报告：`reports/signal_ic_probe_h1_funding_4h.md`（全部 bar）、`..._gate_on.md`（仅 gate 开启的 5,927 根，**事后分析**）。
+
+### rank IC（f1 / f2 / f3）
+
+| 特征 | k=6 全部 | k=18 全部 | k=18 仅 gate-on |
+|---|---|---|---|
+| `sig_funding_current`（z200） | −0.024 / +0.003 / −0.014 | −0.007 / +0.032 / −0.026 | +0.036 / +0.052 / −0.007 |
+| `funding_cum_3d` | −0.063 / +0.024 / −0.070 | **−0.095 / +0.038 / −0.164** | −0.110 / **+0.115** / −0.213 |
+| `funding_cum_7d` | −0.049 / +0.027 / −0.072 | −0.065 / +0.049 / −0.147 | −0.121 / +0.129 / −0.210 |
+| `funding_rank_90d` | −0.022 / +0.026 / −0.022 | −0.017 / +0.057 / −0.048 | +0.014 / +0.098 / −0.047 |
+
+f3 的前/后 10% 分位价差（k=18）：cum_3d −171 bps，cum_7d −154 bps。
+
+### 结论
+- **H1 未通过预注册门槛**：5 个特征 × 2 个视野共 10 组，全部在 f2 反号；步 6 规则回测按规则跳过。
+- **效应存在但方向随 regime 翻转**：累计 funding 在 f1/f3（震荡与熊市）是明确的反向指标（f3 k=18 IC −0.16），但在 f2（2023-11→2025-04 ETF 牛市）是延续指标（+0.04，gate-on 下 +0.12）。"拥挤多头 → 回落"只在无趋势时成立；强趋势里高 funding 是趋势延续的一部分。
+- **gate-on 条件没有救回来，反而更糟**：gate 开着的时段正是趋势最强、拥挤最能持续的时段，f2 反号从 +0.04 放大到 +0.12。这说明"gate 开 & funding 高 → 减仓"这条规则在牛市里会系统性减仓吃掉收益，正是设计 §7 预警的情形。
+- 若只看 IC 均值（−0.07）或最近一折（−0.16、−171 bps），H1 会被误判为通过。分折 + 最近折不反号这个门槛起了作用。
+
+### 下一步
+- H2（OI × 价格方向）等 Spider 回填 OI 历史（todo 8）。
+- funding 线若要继续，只剩一个合理的新假设 H1b：**funding × 趋势强度交互**（如价格距 SMA200 < x% 时才把高 funding 当反向信号）。这是第二次看数据，必须作为新假设登记，且只允许在 f1/f2 上探索、f3 留出。
+
+### code-reviewer（1 HIGH + 2 MEDIUM + 1 LOW，已修）
+- HIGH：`signal_elimination.py` 未传 `required_contracts`，正是当年 6 信号全零事故的入口 → 现按候选池（扣除 `--exclude`）推导必需数据源；funding-only 跑法用 `--exclude sig_oi_*,sig_liq_*`。
+- MEDIUM：`backtest_gbdt.py` 的 `required_contracts` 是死代码（从未 `with_contracts=True`）→ 由信号池推导。
+- MEDIUM：覆盖检查只看总比例，窗口内部空洞也会被填零 → 新增 `interior_gaps`，必需数据源首次观测之后出现 NaN 直接报错。
+- LOW：`meta_labeling_smoke.py` 未用导入。
+- 全量测试 318 通过（+4 既有 `test_contract_db` 顺序依赖失败）。
+
+### 已知遗留
+- `tests/test_contract_db.py` 4 个用例在整文件运行时失败、单独运行通过（SQLite 引擎 fixture 跨用例泄漏），`utils/db.py` 与该测试均未改动，属既有问题。
+- `scripts/signal_linear_baseline_pooled.py` 仍不支持合约数据（本期未用）。
+
+---
+
 # 多币种合并线性基线（2026-09-06）
 
 假设：4h 信号池 AUC≈0.53 的瓶颈是样本量（BTC 单币 ~12k 根 bar），而非特征。若 BTC/ETH/BNB/SOL 合并训练后

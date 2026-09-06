@@ -263,3 +263,66 @@ def test_liq_long_zscore_spike_positive() -> None:
     base.iloc[-1] = 5e7   # 大爆仓事件
     out = compute_sig_liq_long_zscore(base, window=100)
     assert out.iloc[-1] > 0.9
+
+
+# ---------------------------------------------------------------------------
+# Timeframe-aware windows（2026-09-06：4h 上 288-bar 均值 = 48 天，必须按 tf 换算）
+# ---------------------------------------------------------------------------
+
+from utils.signals import contract_signal_windows  # noqa: E402
+
+
+def test_contract_signal_windows_5min_matches_legacy_defaults() -> None:
+    w = contract_signal_windows("5min")
+    assert w == {"funding_mean": 288, "oi_roll": 12, "liq_eps": 96}
+
+
+def test_contract_signal_windows_4h_is_time_denominated() -> None:
+    # 1 day / 4h = 6 bars; 1h / 4h < 1 bar → floor to 1; 8h / 4h = 2
+    w = contract_signal_windows("4h")
+    assert w == {"funding_mean": 6, "oi_roll": 1, "liq_eps": 2}
+
+
+def test_contract_signal_windows_1h() -> None:
+    assert contract_signal_windows("1h") == {"funding_mean": 24, "oi_roll": 1, "liq_eps": 8}
+
+
+def test_contract_signal_windows_unknown_timeframe_raises() -> None:
+    import pytest
+    with pytest.raises(ValueError):
+        contract_signal_windows("banana")
+
+
+def _contract_df(n: int, freq: str, seed: int = 1) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    return pd.DataFrame({
+        "timestamp": _ts(n, freq),
+        "funding_rate": rng.normal(0, 1e-4, n),
+        "sum_open_interest": 1e8 + rng.normal(0, 1e5, n).cumsum(),
+        "liq_long_usd":  np.abs(rng.normal(5e5, 2e5, n)),
+        "liq_short_usd": np.abs(rng.normal(5e5, 2e5, n)),
+    })
+
+
+def test_add_contract_signals_explicit_5min_equals_default() -> None:
+    """不带 timeframe 的旧调用与 timeframe='5min' 必须逐值一致（Spider 同步不受影响）。"""
+    df = _contract_df(600, "5min")
+    legacy = add_contract_signals(df)
+    explicit = add_contract_signals(df, timeframe="5min")
+    pd.testing.assert_frame_equal(legacy[CONTRACT_SIGNAL_COLS], explicit[CONTRACT_SIGNAL_COLS])
+
+
+def test_funding_trend_4h_decays_within_a_day_after_pulse() -> None:
+    """4h 上一个 1 天的 funding 脉冲结束后，tf 感知的 24h 均值应在 ~6 根内回落；
+    旧 288 根窗口（=48 天）会让信号在几十根内持续偏高。"""
+    n, start, end = 500, 400, 406      # 6 根 4h = 1 天脉冲
+    rng = np.random.default_rng(3)
+    fr = rng.normal(0, 1e-4, n)
+    fr[start:end] += 1e-3
+    df = pd.DataFrame({"timestamp": _ts(n, "4h"), "funding_rate": fr})
+    aware = add_contract_signals(df, timeframe="4h")["sig_funding_trend"]
+    legacy = add_contract_signals(df)["sig_funding_trend"]
+    assert aware.iloc[end - 1] > 0.9
+    probe = end + 6
+    assert abs(aware.iloc[probe]) < 0.3, aware.iloc[probe]
+    assert legacy.iloc[probe] > 0.6, legacy.iloc[probe]

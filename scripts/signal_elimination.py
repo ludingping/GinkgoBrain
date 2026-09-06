@@ -35,6 +35,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from agents.ppo_shared import resample_ohlcv  # noqa: E402
 from utils.data_loader import merge_contract_data  # noqa: E402
+from utils.data_loader import required_contract_sources  # noqa: E402
 from utils.db import (  # noqa: E402
     read_funding,
     read_liquidation_agg,
@@ -43,6 +44,7 @@ from utils.db import (  # noqa: E402
 )
 from utils.indicators import add_indicators  # noqa: E402
 from utils.signals import (  # noqa: E402
+    CONTRACT_SIGNAL_COLS,
     SIGNAL_WARMUP_WINDOW,
     add_contract_signals,
     add_signals,
@@ -288,6 +290,11 @@ def write_log(
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _matches_any(col: str, patterns: list[str]) -> bool:
+    """`--exclude` glob-lite: exact name or `prefix*`."""
+    return any(col == p or (p.endswith("*") and col.startswith(p[:-1])) for p in patterns)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=None,
@@ -316,7 +323,16 @@ def main() -> int:
         if not args.config.exists():
             print(f"ERROR: config not found: {args.config}", file=sys.stderr)
             return 1
-        df_tf, tf = load_df_from_config(args.config, with_contracts=args.with_contracts)
+        # Coverage gate: every contract source whose signals are still candidates
+        # (not --exclude'd) must cover >=95 % of the window, otherwise they would
+        # enter the pool as all-zero columns (the 4h v2 incident). Use
+        # --exclude sig_oi_*,sig_liq_* for a funding-only run.
+        patterns = [p.strip() for p in args.exclude.split(",") if p.strip()]
+        required = (required_contract_sources(
+            [c for c in CONTRACT_SIGNAL_COLS if not _matches_any(c, patterns)])
+            if args.with_contracts else set())
+        df_tf, tf = load_df_from_config(args.config, with_contracts=args.with_contracts,
+                                        required_contracts=required)
         if tf not in BARS_PER_YEAR:
             print(f"ERROR: unknown timeframe '{tf}'", file=sys.stderr)
             return 1
@@ -325,7 +341,7 @@ def main() -> int:
         print(f"DB load: timeframe={tf}, bars={len(df_tf)}, bars/year={periods_per_year}")
         df_ind = add_indicators(df_tf)
         df = add_signals(df_ind)
-        df = add_contract_signals(df)
+        df = add_contract_signals(df, timeframe=tf)
         output_path = args.output or REPO_ROOT / "config" / f"signals_v1_{tf}.yaml"
         log_path = args.log or REPO_ROOT / "config" / f"signal_elimination_log_{tf}.md"
     else:
@@ -338,7 +354,7 @@ def main() -> int:
         df_raw = pd.read_parquet(args.cache)
         df_ind = add_indicators(df_raw)
         df = add_signals(df_ind)
-        df = add_contract_signals(df)
+        df = add_contract_signals(df, timeframe="4h")  # legacy 4h parquet cache
         periods_per_year = PERIODS_PER_YEAR
         source_tag = f"cache:{args.cache.name}"
         output_path = args.output or REPO_ROOT / "config" / "signals_v1.yaml"
@@ -350,10 +366,7 @@ def main() -> int:
     # Manual exclusions (serving constraints, e.g. sig_mtf_* need more history
     # than a 500-bar live window; sig_regime_drawdown is constant in bull regimes).
     patterns = [p.strip() for p in args.exclude.split(",") if p.strip()]
-    excluded_manual = [
-        c for c in sig_cols
-        if any(c == p or (p.endswith("*") and c.startswith(p[:-1])) for p in patterns)
-    ]
+    excluded_manual = [c for c in sig_cols if _matches_any(c, patterns)]
     # Zero-variance columns (e.g. contract signals without --with-contracts are
     # all 0): Sharpe=0 passes the gate and corr() is NaN, which makes the
     # greedy sort order undefined → arbitrary eliminations. Drop them first.

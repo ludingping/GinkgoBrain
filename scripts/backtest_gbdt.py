@@ -40,6 +40,9 @@ from agents.gbdt_combiner import GBDTCombiner            # noqa: E402
 from agents.ppo_shared import resample_ohlcv             # noqa: E402
 from envs.signal_layered_env import load_signal_list     # noqa: E402
 from utils.data_loader import merge_contract_data        # noqa: E402
+from utils.data_loader import (  # noqa: E402
+    check_contract_coverage, neutral_fill_contract_columns, required_contract_sources,
+)
 from utils.db import (                                    # noqa: E402
     read_funding,
     read_liquidation_agg,
@@ -94,7 +97,8 @@ def add_risk_overlay(df: pd.DataFrame, timeframe: str,
 def load_data(cfg: dict, test_start: str | None, test_end: str | None = None,
               vol_window: int = 168, regime_ma_days: int = 200,
               regime_resample: str = "1D",
-              *, with_contracts: bool = False) -> pd.DataFrame:
+              *, with_contracts: bool = False,
+              required_contracts=frozenset()) -> pd.DataFrame:
     c = cfg["crypto"]
     tz = c.get("timezone", "Asia/Shanghai")
     start_utc = pd.Timestamp(c["start_date"], tz=tz).tz_convert("UTC").isoformat()
@@ -131,19 +135,12 @@ def load_data(cfg: dict, test_start: str | None, test_end: str | None = None,
         df_tf = merge_contract_data(
             df_tf, df_funding=df_funding, df_oi=df_oi, df_liq=df_liq,
         )
-        # 防 add_indicators 全局 dropna 把合约起点前的 OHLCV 行误删
-        for col in (
-            "funding_rate", "sum_open_interest", "sum_open_interest_value",
-            "liq_long_usd", "liq_short_usd", "liq_total_usd",
-        ):
-            if col in df_tf.columns:
-                df_tf[col] = df_tf[col].fillna(0.0)
-        if "funding_origin" in df_tf.columns:
-            df_tf["funding_origin"] = df_tf["funding_origin"].fillna("")
+        check_contract_coverage(df_tf, required=required_contracts)
+        df_tf = neutral_fill_contract_columns(df_tf)
 
     df = add_indicators(df_tf)
     df = add_signals(df)
-    df = add_contract_signals(df)
+    df = add_contract_signals(df, timeframe=timeframe)
     df = add_risk_overlay(df, timeframe, vol_window, regime_ma_days, regime_resample)
 
     tz_ = c.get("timezone", "Asia/Shanghai")
@@ -529,7 +526,9 @@ def main() -> int:
     # Load data
     bt_df = load_data(cfg, args.test_start, args.test_end,
                       vol_window=args.vol_window, regime_ma_days=args.regime_ma_days,
-                      regime_resample=args.regime_resample)
+                      regime_resample=args.regime_resample,
+                      with_contracts=bool(required_contract_sources(signal_cols)),
+                      required_contracts=required_contract_sources(signal_cols))
     missing = [s for s in signal_cols if s not in bt_df.columns]
     if missing:
         print(f"ERROR: missing signal columns: {missing}", file=sys.stderr)

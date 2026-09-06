@@ -48,6 +48,9 @@ from envs.signal_layered_env import (                                  # noqa: E
     SignalLayeredEnv, TARGET_POSITION, load_signal_list,
 )
 from utils.data_loader import merge_contract_data                      # noqa: E402
+from utils.data_loader import (  # noqa: E402
+    check_contract_coverage, neutral_fill_contract_columns, required_contract_sources,
+)
 from utils.db import (                                                  # noqa: E402
     read_funding,
     read_liquidation_agg,
@@ -95,7 +98,7 @@ def daily_sma_gate(full_df: pd.DataFrame, bt_df: pd.DataFrame,
     # not shift every close time in the slice).
     bar = pd.Series(bt_ts).diff().dropna().mode().iloc[0]
     last_closed_day = (bt_ts + bar).floor("D") - pd.Timedelta(days=1)
-    return ok_daily.reindex(last_closed_day).fillna(False).to_numpy(dtype=bool)
+    return ok_daily.reindex(last_closed_day, fill_value=False).to_numpy(dtype=bool)
 
 
 def gated(act_fn, gate: np.ndarray):
@@ -122,6 +125,7 @@ def load_data(
     *,
     with_contracts: bool = False,
     prefix_rows: int = 0,
+    required_contracts=frozenset(),
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return (full_df_with_signals, backtest_df) based on config + optional date cut.
 
@@ -164,19 +168,12 @@ def load_data(
         df_tf = merge_contract_data(
             df_tf, df_funding=df_funding, df_oi=df_oi, df_liq=df_liq,
         )
-        # 防 add_indicators 全局 dropna 把合约起点前的 OHLCV 行误删
-        for col in (
-            "funding_rate", "sum_open_interest", "sum_open_interest_value",
-            "liq_long_usd", "liq_short_usd", "liq_total_usd",
-        ):
-            if col in df_tf.columns:
-                df_tf[col] = df_tf[col].fillna(0.0)
-        if "funding_origin" in df_tf.columns:
-            df_tf["funding_origin"] = df_tf["funding_origin"].fillna("")
+        check_contract_coverage(df_tf, required=required_contracts)
+        df_tf = neutral_fill_contract_columns(df_tf)
 
     df = add_indicators(df_tf)
     df = add_signals(df)
-    df = add_contract_signals(df)
+    df = add_contract_signals(df, timeframe=c.get("timeframe", "4h"))
 
     # Slice priority: CLI dates → config val window → legacy ratio tail.
     if not test_start and c.get("val_start"):
@@ -403,6 +400,24 @@ def summarise(steps_log: list[dict], trades_log: list[dict], periods_per_year: i
     }
 
 
+def buy_and_hold_metrics(
+    bt_df: pd.DataFrame, signal_cols: list[str], env_cfg: dict, periods_per_year: int,
+) -> dict:
+    """Pure price path from the first decision bar, one entry fee (same keys as summarise)."""
+    probe = SignalLayeredEnv(bt_df, signal_cols=signal_cols, **env_cfg)
+    start = probe._min_start()
+    close = probe._close
+    log_rets = np.diff(np.log(close[start:]))
+    commission = float(env_cfg.get("commission", 0.0005))
+    pv = 10_000.0 * (1 - commission) * np.exp(np.concatenate([[0.0], np.cumsum(log_rets)]))
+    return {
+        "total_return": float(pv[-1] / 10_000.0 - 1),
+        "max_drawdown": float(np.min(pv / np.maximum.accumulate(pv)) - 1),
+        "sharpe": annualised_sharpe(log_rets, periods_per_year),
+        "trades": 1, "steps": int(len(log_rets)), "mean_reward": float("nan"),
+    }
+
+
 def run_baselines(
     bt_df: pd.DataFrame,
     signal_cols: list[str],
@@ -429,19 +444,7 @@ def run_baselines(
         steps, trades = run_backtest(act_fn, env, bt_df, signal_cols)
         out[name] = summarise(steps, trades, periods_per_year)
 
-    # pure buy & hold
-    probe = SignalLayeredEnv(bt_df, signal_cols=signal_cols, **env_cfg)
-    start = probe._min_start()
-    close = probe._close
-    log_rets = np.diff(np.log(close[start:]))
-    commission = float(env_cfg.get("commission", 0.0005))
-    pv = 10_000.0 * (1 - commission) * np.exp(np.concatenate([[0.0], np.cumsum(log_rets)]))
-    out["buy_and_hold"] = {
-        "total_return": float(pv[-1] / 10_000.0 - 1),
-        "max_drawdown": float(np.min(pv / np.maximum.accumulate(pv)) - 1),
-        "sharpe": annualised_sharpe(log_rets, periods_per_year),
-        "trades": 1, "steps": int(len(log_rets)), "mean_reward": float("nan"),
-    }
+    out["buy_and_hold"] = buy_and_hold_metrics(bt_df, signal_cols, env_cfg, periods_per_year)
 
     rollout("gate_only", gated(lambda obs, env: (4, None), gate))
     if policy_act_fn is not None:
@@ -701,7 +704,8 @@ def main() -> int:
     periods_per_year = bars_per_year(cfg["crypto"].get("timeframe", "4h"))
 
     full_df, bt_df = load_data(cfg, args.test_start, args.test_end,
-                               with_contracts=needs_contracts, prefix_rows=prefix_rows)
+                               with_contracts=needs_contracts, prefix_rows=prefix_rows,
+                               required_contracts=required_contract_sources(signal_cols))
     period_label = (f"{bt_df['timestamp'].iloc[prefix_rows]} → "
                     f"{bt_df['timestamp'].iloc[-1]}")
 
