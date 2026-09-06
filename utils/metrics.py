@@ -4,6 +4,30 @@ import pandas as pd
 from stable_baselines3.common.vec_env import VecEnv
 
 
+# Bars per year by timeframe (24/7 crypto). Canonical copy — scripts that
+# annualise a Sharpe ratio must derive the factor from the config timeframe,
+# never hardcode one (the 4h constant 2190 halved every reported 1h Sharpe).
+BARS_PER_YEAR: dict[str, int] = {
+    "1m": 1440 * 365, "5min": 288 * 365, "15min": 96 * 365, "30min": 48 * 365,
+    "1h": 24 * 365, "2h": 12 * 365, "4h": 6 * 365, "1d": 365,
+}
+
+
+def bars_per_year(timeframe: str) -> int:
+    key = str(timeframe).lower()
+    if key not in BARS_PER_YEAR:
+        raise ValueError(f"Unknown timeframe '{timeframe}'; known: {sorted(BARS_PER_YEAR)}")
+    return BARS_PER_YEAR[key]
+
+
+def annualised_sharpe(returns, periods_per_year: int) -> float:
+    """Sharpe of a per-bar return series, annualised by sqrt(periods_per_year)."""
+    r = np.asarray(returns, dtype=float)
+    if r.size < 2:
+        return 0.0
+    return float(r.mean() / (r.std() + 1e-10) * np.sqrt(periods_per_year))
+
+
 def evaluate_policy(model, env, n_episodes: int = 10) -> dict:
     """
     Run `n_episodes` episodes and return aggregated performance metrics.

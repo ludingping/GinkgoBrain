@@ -1,0 +1,66 @@
+# Stage 2 — 1h signal-layered PPO, v3 (2026-09-05).
+#
+# v1/v2 (config/stage2_1h_signal.yaml, 2026-04) 失败复盘：
+#   - ent_coef 0.05 → 策略熵全程 1.0–1.6（ln5=1.61），从未收敛；
+#   - 无换手限频 → 3681 笔 / 9163 步，手续费吃光收益；
+#   - risk_aversion 0.5 使任意仓位期望奖励为负，eval 曲线平坦，best_model 无信息；
+#   - obs 滞后一根 K 线（envs/signal_layered_env.py v3 已修）。
+# v3 变更：MaskablePPO + min_hold_steps；ent_coef 0.003；惩罚项显式；日期切分 +
+#   留出测试集（2026-04-13 起，模型从未见过）；max_episode_steps 让 random_start 均匀覆盖。
+#
+# 所有 env / algo_kwargs 键显式写全 —— default.yaml 会 deep_merge 进来
+# （例如 env.trade_penalty_coef: 1.0），漏写即静默继承。
+#
+# Usage:
+#   uv run python train.py --config config/stage2_1h_signal_v3.yaml --paradigm signal_layered
+#   uv run python scripts/backtest_signal_layered.py --config config/stage2_1h_signal_v3.yaml \
+#       --model models/saved/BTCUSDT_signal_layered_1h_v3/best_model.zip --test-start "2026-04-13 00:00:00"
+paradigm: signal_layered
+
+training:
+  algo: ppo
+  action_masking: true         # → sb3_contrib.MaskablePPO；env.action_masks() 实现 min_hold / cooldown
+  policy: MlpPolicy
+  total_timesteps: 1_000_000
+  n_envs: 8
+  backend: sb3
+  algo_kwargs:
+    learning_rate: 1.5e-4
+    gamma: 0.995
+    n_steps: 1024
+    batch_size: 512
+    n_epochs: 10
+    gae_lambda: 0.95
+    clip_range: 0.2
+    ent_coef: 0.003            # v2: 0.05
+
+env:
+  window_size: 96              # 1h × 96 = 4 天
+  initial_balance: 10000.0
+  commission: 0.0005
+  # v2: 0.5 → 满仓每步 −0.00076 的"敞口税"（backtest const_100pct 行），是 1h 合理
+  # alpha 量级（~1e-4/步）的 8 倍，任何仓位期望奖励都为负。0.05 → 税 ≈ −8e-5/步，与 alpha 同阶。
+  risk_aversion_coef: 0.05
+  excess_return_coef: 0.5
+  action_inertia_coef: 0.002   # 按仓位档位变化幅度的连续惩罚
+  trade_penalty_coef: 0.001    # 每次 agent 主动切换的固定惩罚（≈ 2 倍单边手续费）
+  min_hold_steps: 4            # 切换后冻结 4 根 K 线 → 换手上限 ≈ steps/5
+  max_episode_steps: 2160      # 90 天；random_start 均匀覆盖 2022–2025
+  # 1h ATR(14) ≈ 0.5%，2×ATR = 1% 止损在小时噪声下频繁触发（200k smoke：142 次止损/9167 bars，
+  # 每次止损+冷却+重入 = 2 笔换手）。4×ATR ≈ 2% 与 4h 配置的 2×ATR(4h) 风险距离对齐。
+  stop_atr_mult: 4.0
+  stop_cooldown_steps: 6
+  random_start: true
+
+signals:
+  config_path: config/signals_v1_1h.yaml
+
+crypto:
+  symbol: "BTC/USDT"
+  timeframe: "1h"
+  start_date: "2022-01-01 00:00:00"
+  val_start: "2025-03-27 00:00:00"    # 与 v2 的 0.75 比例切分点一致，便于对比
+  test_start: "2026-04-13 00:00:00"   # v2 数据截止日；此后 5 个月为纯留出集
+  end_date: "2026-09-04 00:00:00"
+  timezone: "Asia/Shanghai"
+  db_table: "public.crypto_kline_binance"

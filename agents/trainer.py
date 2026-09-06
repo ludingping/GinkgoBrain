@@ -2,11 +2,15 @@
 import os
 from pathlib import Path
 
+from sb3_contrib import MaskablePPO
+from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
+from sb3_contrib.common.wrappers import ActionMasker
 from stable_baselines3 import PPO, A2C, SAC, TD3
 from stable_baselines3.common.callbacks import (
     EvalCallback,
     CheckpointCallback,
 )
+from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 import torch
@@ -18,7 +22,52 @@ ALGORITHMS = {
     "a2c": A2C,
     "sac": SAC,
     "td3": TD3,
+    "maskable_ppo": MaskablePPO,   # needs env.action_masks(); see SignalLayeredEnv
 }
+MASKABLE_ALGOS = frozenset({"maskable_ppo"})
+
+# Terminal-info keys the trading envs expose; logged to TB after every eval so
+# checkpoints can be judged on P&L / turnover rather than on mean_reward alone.
+_EVAL_INFO_KEYS = ("cum_log_return", "n_trades", "n_stops")
+
+
+def _action_mask_fn(env):
+    # ActionMasker hands us the env it wraps (a Monitor); gymnasium ≥1.0 does
+    # not forward unknown attributes through wrappers, so go to the base env.
+    return env.unwrapped.action_masks()
+
+
+class _EvalStatsMixin:
+    """Capture the terminal `info` of each eval episode and log trading stats.
+
+    Works for both EvalCallback and MaskableEvalCallback: both route every
+    evaluate_policy step through `_log_success_callback(locals_, globals_)`,
+    where `done` / `info` are locals of the evaluation loop.
+    """
+
+    def _log_success_callback(self, locals_, globals_) -> None:
+        super()._log_success_callback(locals_, globals_)
+        if locals_.get("done"):
+            self._final_infos.append(locals_["info"])
+
+    def _on_step(self) -> bool:
+        self._final_infos = []
+        continue_training = super()._on_step()
+        if self._final_infos:
+            for key in _EVAL_INFO_KEYS:
+                vals = [i[key] for i in self._final_infos if key in i]
+                if vals:
+                    self.logger.record(f"eval/{key}", float(sum(vals) / len(vals)))
+            self.logger.dump(self.num_timesteps)
+        return continue_training
+
+
+class TradingEvalCallback(_EvalStatsMixin, EvalCallback):
+    pass
+
+
+class MaskableTradingEvalCallback(_EvalStatsMixin, MaskableEvalCallback):
+    pass
 
 class TradingCNN(BaseFeaturesExtractor):
     """
@@ -82,6 +131,7 @@ class Trainer:
         normalize_obs: bool = True,
         normalize_reward: bool = False,
         clip_obs: float = 10.0,
+        n_eval_episodes: int = 5,
     ):
         self.run_name = run_name
         self.model_dir = Path(model_dir)
@@ -92,11 +142,22 @@ class Trainer:
         algo_cls = ALGORITHMS.get(algo.lower())
         if algo_cls is None:
             raise ValueError(f"Unknown algorithm '{algo}'. Choose from: {list(ALGORITHMS)}")
+        is_maskable = algo.lower() in MASKABLE_ALGOS
+
+        # Monitor gives rollout/ep_rew_mean + ep_len_mean in TB; ActionMasker
+        # exposes env.action_masks() to MaskablePPO / MaskableEvalCallback.
+        def wrapped_env_fn():
+            env = Monitor(env_fn())
+            return ActionMasker(env, _action_mask_fn) if is_maskable else env
+
+        def wrapped_eval_env_fn():
+            env = Monitor(eval_env_fn())
+            return ActionMasker(env, _action_mask_fn) if is_maskable else env
 
         if n_envs > 1:
-            venv = SubprocVecEnv([env_fn] * n_envs, start_method="fork")
+            venv = SubprocVecEnv([wrapped_env_fn] * n_envs, start_method="fork")
         else:
-            venv = DummyVecEnv([env_fn])
+            venv = DummyVecEnv([wrapped_env_fn])
 
         if normalize_obs:
             venv = VecNormalize(
@@ -116,7 +177,7 @@ class Trainer:
 
         self.callbacks = []
         if eval_env_fn is not None:
-            eval_venv = DummyVecEnv([eval_env_fn])
+            eval_venv = DummyVecEnv([wrapped_eval_env_fn])
             if normalize_obs:
                 eval_venv = VecNormalize(
                     eval_venv,
@@ -143,12 +204,14 @@ class Trainer:
                     return True
 
             self.callbacks.append(_SyncNormCallback(self.venv, eval_venv))
+            eval_cb_cls = MaskableTradingEvalCallback if is_maskable else TradingEvalCallback
             self.callbacks.append(
-                EvalCallback(
+                eval_cb_cls(
                     self.eval_venv,
                     best_model_save_path=str(self.model_dir / run_name),
                     log_path=str(self.log_dir / run_name),
                     eval_freq=max(10_000 // n_envs, 1),
+                    n_eval_episodes=n_eval_episodes,
                     deterministic=True,
                     render=False,
                 )

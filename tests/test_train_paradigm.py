@@ -62,17 +62,34 @@ def test_deep_merge_preserves_new_env_keys():
         assert legacy in merged["env"]
 
 
-def test_legacy_env_keys_get_filtered_for_signal_env():
-    """The whitelist in train._train_signal_layered must exclude legacy keys."""
+def test_allowed_env_keys_match_env_signature():
+    """Every key train.py forwards must be a real SignalLayeredEnv parameter."""
     import inspect
+
+    from train import _ALLOWED_ENV_KEYS
 
     accepted = set(inspect.signature(SignalLayeredEnv).parameters) - {
         "self", "df", "signal_cols"
     }
-    for legacy in ("trade_penalty_coef", "action_inertia_coef"):
-        assert legacy not in accepted, (
-            f"{legacy} should NOT be accepted by SignalLayeredEnv"
-        )
+    assert _ALLOWED_ENV_KEYS <= accepted, _ALLOWED_ENV_KEYS - accepted
+    for key in ("trade_penalty_coef", "action_inertia_coef",
+                "min_hold_steps", "max_episode_steps"):
+        assert key in _ALLOWED_ENV_KEYS
+
+
+def test_v3_config_overrides_every_forwarded_default_env_key():
+    """Deep-merge trap: default.yaml sets env.trade_penalty_coef=1.0 and that key
+    is forwarded to SignalLayeredEnv. A stage config that omits it silently
+    trains with a -1.0/switch penalty. v3 must pin every such key explicitly."""
+    from train import _ALLOWED_ENV_KEYS
+
+    with open(REPO_ROOT / "config/default.yaml") as f:
+        base_env = yaml.safe_load(f)["env"]
+    with open(REPO_ROOT / "config/stage2_1h_signal_v3.yaml") as f:
+        stage_env = yaml.safe_load(f)["env"]
+
+    leaking = (set(base_env) & _ALLOWED_ENV_KEYS) - set(stage_env)
+    assert not leaking, f"v3 config inherits from default.yaml: {sorted(leaking)}"
 
 
 # ---------------------------------------------------------------- signals loader

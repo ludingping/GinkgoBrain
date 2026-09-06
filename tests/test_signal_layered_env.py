@@ -177,6 +177,25 @@ def test_atr_stop_triggers_and_force_closes():
     assert triggered, "ATR stop should have fired after the engineered drop"
 
 
+def test_stop_atr_mult_zero_disables_stop_loss():
+    """stop_atr_mult <= 0 must switch the stop off entirely (not 'stop on any
+    loss'); steps_since_stop then stays at window_size → state feature 1.0,
+    matching a serving side that implements no stop."""
+    df = _make_stop_trigger_df()
+    env = SignalLayeredEnv(df, signal_cols=SIG_COLS, window_size=10,
+                           stop_atr_mult=0.0, stop_cooldown_steps=0)
+    env.reset()
+    env.step(4)
+    for _ in range(20):
+        _, _, done, _, info = env.step(4)
+        assert not info["stop_loss_triggered"]
+        if done:
+            break
+    assert env.position > 0 and not env.stop_loss_events
+    assert env._steps_since_stop == 10
+    assert env.action_masks().tolist() == [True] * 5
+
+
 # ---------------------------------------------------------------- TC-B5
 
 def test_stop_cooldown_blocks_reentry():
@@ -260,13 +279,16 @@ def test_risk_aversion_asymmetric_on_drop():
 # ---------------------------------------------------------------- TC-B7
 
 def test_legacy_reward_fields_are_absent():
-    """TC-B7: no missed_opportunity / stop_penalty / action_inertia fields."""
+    """TC-B7: no missed_opportunity / stop_penalty fields. (action_inertia and
+    trade_penalty are opt-in trade-frequency terms, default coef 0.)"""
     env = make_flat_env(window_size=10)
     env.reset()
     for action in [0, 1, 2, 3, 4, 0]:
         _, _, _, _, info = env.step(action)
-        for forbidden in ("missed_opportunity", "stop_penalty", "action_inertia"):
+        for forbidden in ("missed_opportunity", "stop_penalty"):
             assert forbidden not in info["reward_breakdown"]
+        assert info["reward_breakdown"]["action_inertia"] == 0.0
+        assert info["reward_breakdown"]["trade_penalty"] == 0.0
 
 
 def test_stop_step_has_no_extra_penalty():
@@ -289,6 +311,150 @@ def test_stop_step_has_no_extra_penalty():
             # No positive-penalty "stop_penalty" anywhere.
             assert set(rb.keys()) == set(REWARD_KEYS)
             break
+
+
+# ---------------------------------------------------------------- v3: obs alignment
+
+def test_observation_includes_current_bar():
+    """v3 fix: obs last row == signals at current_step (decision uses close[t],
+    whose signals are known at bar close). Previously lagged one bar."""
+    env = make_flat_env(window_size=10)
+    obs, _ = env.reset()
+    t = env.current_step
+    np.testing.assert_allclose(obs[-1, :len(SIG_COLS)], env._sig_mat[t])
+    np.testing.assert_allclose(obs[0, :len(SIG_COLS)], env._sig_mat[t - 9])
+
+    obs, *_ = env.step(0)
+    np.testing.assert_allclose(obs[-1, :len(SIG_COLS)], env._sig_mat[t + 1])
+
+
+# ---------------------------------------------------------------- v3: min_hold_steps
+
+def test_min_hold_freezes_action_after_switch():
+    """After a position switch, actions are frozen for min_hold_steps steps,
+    then free again. Env enforces this even without an action mask."""
+    env = make_flat_env(window_size=10, min_hold_steps=3)
+    env.reset()
+    env.step(2)                       # 0 → 50%, starts the lock
+    pos_after_switch = env.position
+    assert pos_after_switch > 0
+
+    for _ in range(3):
+        env.step(0)                   # try to flatten — must be ignored
+        assert env.position == pytest.approx(pos_after_switch)
+
+    env.step(0)                       # lock expired → sell executes
+    assert env.position == 0.0
+
+
+def test_action_masks_one_hot_during_lock_and_all_true_when_free():
+    env = make_flat_env(window_size=10, min_hold_steps=2)
+    env.reset()
+    assert env.action_masks().tolist() == [True] * 5
+
+    env.step(3)
+    mask = env.action_masks()
+    assert mask.dtype == bool and mask.shape == (5,)
+    assert mask.tolist() == [False, False, False, True, False]
+
+    env.step(3)                       # locked step 1
+    assert env.action_masks().tolist() == [False, False, False, True, False]
+    env.step(3)                       # locked step 2
+    assert env.action_masks().tolist() == [True] * 5
+
+
+def test_forced_hold_is_not_penalised():
+    """A hold forced by min_hold must not trigger inertia / trade penalties."""
+    env = make_flat_env(window_size=10, min_hold_steps=3,
+                        action_inertia_coef=1.0, trade_penalty_coef=1.0)
+    env.reset()
+    env.step(2)
+    _, _, _, _, info = env.step(0)    # forced to hold 2
+    rb = info["reward_breakdown"]
+    assert rb["action_inertia"] == 0.0
+    assert rb["trade_penalty"] == 0.0
+
+
+def test_stop_loss_fires_through_min_hold_lock():
+    """ATR stop is a safety net and must override the min_hold lock."""
+    df = _make_stop_trigger_df()
+    env = SignalLayeredEnv(df, signal_cols=SIG_COLS, window_size=10,
+                           stop_atr_mult=2.0, stop_cooldown_steps=3,
+                           min_hold_steps=50)
+    env.reset()
+    env.step(4)
+    triggered = False
+    for _ in range(25):
+        _, _, done, _, info = env.step(4)
+        if info["stop_loss_triggered"]:
+            triggered = True
+            assert env.position == 0.0
+            # after a stop the only legal action is 0 (cooldown), mask agrees
+            assert env.action_masks().tolist() == [True, False, False, False, False]
+            break
+        if done:
+            break
+    assert triggered
+
+
+def test_stop_out_does_not_rearm_min_hold_lock():
+    """With min_hold > cooldown, re-entry must be possible right after the
+    cooldown: a stop-out is not an agent switch and must not start a lock."""
+    df = _make_stop_trigger_df()
+    env = SignalLayeredEnv(df, signal_cols=SIG_COLS, window_size=10,
+                           stop_atr_mult=2.0, stop_cooldown_steps=3,
+                           min_hold_steps=8)
+    env.reset()
+    env.step(4)
+    while True:
+        _, _, _, _, info = env.step(4)
+        if info["stop_loss_triggered"]:
+            break
+    for _ in range(3):                              # cooldown
+        env.step(4)
+        assert env.position == 0.0
+    assert env.action_masks().tolist() == [True] * 5
+    env.step(4)
+    assert env.position > 0, "re-entry blocked by a lock the stop should not have armed"
+
+
+def test_action_masks_respect_stop_cooldown():
+    df = _make_stop_trigger_df()
+    env = SignalLayeredEnv(df, signal_cols=SIG_COLS, window_size=10,
+                           stop_atr_mult=2.0, stop_cooldown_steps=3)
+    env.reset()
+    env.step(4)
+    while True:
+        _, _, _, _, info = env.step(4)
+        if info["stop_loss_triggered"]:
+            break
+    for _ in range(3):
+        assert env.action_masks().tolist() == [True, False, False, False, False]
+        env.step(4)
+    assert env.action_masks().tolist() == [True] * 5
+
+
+# ---------------------------------------------------------------- v3: max_episode_steps
+
+def test_max_episode_steps_truncates():
+    env = make_flat_env(n=400, window_size=10, max_episode_steps=5)
+    env.reset()
+    for i in range(4):
+        _, _, terminated, truncated, _ = env.step(0)
+        assert not terminated and not truncated, f"step {i}"
+    _, _, terminated, truncated, _ = env.step(0)
+    assert truncated and not terminated
+
+    env.reset()
+    _, _, terminated, truncated, _ = env.step(0)
+    assert not truncated, "counter must reset with the episode"
+
+
+def test_no_truncation_when_max_episode_steps_unset():
+    env = make_flat_env(n=400, window_size=10)
+    env.reset()
+    truncs = [env.step(0)[3] for _ in range(20)]
+    assert not any(truncs)
 
 
 # ---------------------------------------------------------------- gymnasium contract

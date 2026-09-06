@@ -10,7 +10,18 @@ Usage:
   python scripts/backtest_signal_layered.py \\
       --model models/saved/BTCUSDT_ppo_4h_signal/best_model.zip \\
       --config config/stage2_4h_signal.yaml \\
-      [--test-start 2025-04-01] [--run-name BTCUSDT_ppo_4h_signal]
+      [--test-start 2025-04-01] [--test-end 2026-04-13] [--run-name BTCUSDT_ppo_4h_signal]
+
+Slice selection (v3): --test-start/--test-end win; otherwise the config's
+`crypto.val_start` → `crypto.test_start` window (the EvalCallback validation
+slice); otherwise the legacy 1-train_ratio tail. Every slice is prefixed with
+`SignalLayeredEnv.warmup_rows(window_size)` bars so the first decision lands on
+the requested start. Sharpe is annualised from the config timeframe.
+
+Baselines (same slice, same env costs) are appended to the report: pure
+buy&hold, a `sig_mtf_4h_trend > 0 → 100%` rule, and constant positions
+p ∈ {0, 25, 50, 75, 100}% — the last row-set doubles as the reward table used to
+calibrate `risk_aversion_coef`.
 """
 from __future__ import annotations
 
@@ -44,7 +55,62 @@ from utils.db import (                                                  # noqa: 
     read_open_interest,
 )
 from utils.indicators import add_indicators                            # noqa: E402
+from utils.metrics import annualised_sharpe, bars_per_year             # noqa: E402
 from utils.signals import add_contract_signals, add_signals            # noqa: E402
+from utils.splits import slice_by_dates                                # noqa: E402
+
+# Env kwargs the backtest forwards from the config. Must stay a superset of
+# everything that changes *dynamics* (min_hold / stop / cooldown / commission),
+# otherwise the backtest silently diverges from training.
+_ALLOWED_ENV_KEYS = {
+    "window_size", "initial_balance", "commission",
+    "risk_aversion_coef", "excess_return_coef",
+    "action_inertia_coef", "trade_penalty_coef",
+    "stop_atr_mult", "stop_cooldown_steps", "min_hold_steps",
+}
+
+RULE_SIGNAL = "sig_mtf_4h_trend"      # rule baseline: long 100 % when > 0
+GATE_SMA_DAYS = 200                   # Spider overlay: last closed UTC daily close > SMA200
+
+
+def daily_sma_gate(full_df: pd.DataFrame, bt_df: pd.DataFrame,
+                   sma_days: int = GATE_SMA_DAYS) -> np.ndarray:
+    """Per-bar bool (aligned to bt_df) mirroring Spider's regime gate
+    (`overlay.compute_regime_ok`).
+
+    Computed on `full_df` because SMA200 needs 200 *days* of history — far more
+    than the slice's warmup prefix. Daily bars are **UTC** days (Spider fetches
+    Binance 1d klines) whatever the frame's display tz. The decision at a bar
+    closing at time c may use the last *fully closed* day, i.e. floor(c) − 1 day
+    (c == D+1 00:00 exactly → day D). Gate is False while the SMA is not warmed up.
+    """
+    ts = pd.DatetimeIndex(full_df["timestamp"]).tz_convert("UTC")
+    close = pd.Series(full_df["close"].to_numpy(), index=ts)
+    daily = close.resample("1D", closed="left", label="left").last()
+    sma = daily.rolling(sma_days).mean()
+    ok_daily = (daily > sma) & sma.notna()
+
+    bt_ts = pd.DatetimeIndex(bt_df["timestamp"]).tz_convert("UTC")
+    # Bar duration = modal spacing (a data gap between the first two rows must
+    # not shift every close time in the slice).
+    bar = pd.Series(bt_ts).diff().dropna().mode().iloc[0]
+    last_closed_day = (bt_ts + bar).floor("D") - pd.Timedelta(days=1)
+    return ok_daily.reindex(last_closed_day).fillna(False).to_numpy(dtype=bool)
+
+
+def gated(act_fn, gate: np.ndarray):
+    """Wrap an act_fn so the target is forced to 0 % when the gate is off.
+
+    Applied *before* env.step, so the env's min_hold lock may delay a gate
+    exit by ≤ min_hold_steps bars. Spider should apply the gate *after* its
+    lock so the gate can always flatten.
+    """
+    def act(obs, env):
+        action, probs = act_fn(obs, env)
+        if not gate[env.current_step]:
+            return 0, probs
+        return action, probs
+    return act
 
 
 # ═══════════════════════════════════════════════════════════════════ data
@@ -55,12 +121,14 @@ def load_data(
     test_end: str | None = None,
     *,
     with_contracts: bool = False,
+    prefix_rows: int = 0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return (full_df_with_signals, backtest_df) based on config + optional date cut.
 
     Args:
         with_contracts: True 时跨库 join funding/OI/liquidation 到 OHLCV，与
             train.py / signal_linear_baseline 的 with_contracts 镜像一致。
+        prefix_rows: history bars prepended to the slice (= env warmup rows).
     """
     c = cfg["crypto"]
     tz = c.get("timezone", "Asia/Shanghai")
@@ -110,24 +178,86 @@ def load_data(
     df = add_signals(df)
     df = add_contract_signals(df)
 
+    # Slice priority: CLI dates → config val window → legacy ratio tail.
+    if not test_start and c.get("val_start"):
+        test_start = c["val_start"]
+        test_end = test_end or c.get("test_start")
+        print(f"[slice] using config validation window {test_start} → {test_end}")
     if test_start:
-        test_ts = pd.Timestamp(test_start, tz=tz)
-        bt_df = df[df["timestamp"] >= test_ts].reset_index(drop=True)
+        bt_df = slice_by_dates(df, test_start, test_end, prefix_rows=prefix_rows)
     else:
-        split = int(len(df) * cfg["crypto"].get("train_ratio", 0.75))
-        bt_df = df.iloc[split:].reset_index(drop=True)
-    if test_end:
-        end_ts = pd.Timestamp(test_end, tz=tz)
-        bt_df = bt_df[bt_df["timestamp"] < end_ts].reset_index(drop=True)
-    print(f"Backtest period: {bt_df['timestamp'].iloc[0]} → "
-          f"{bt_df['timestamp'].iloc[-1]} ({len(bt_df)} bars)")
+        split = int(len(df) * c.get("train_ratio", 0.75))
+        bt_df = df.iloc[max(0, split - prefix_rows):].reset_index(drop=True)
+        if test_end:
+            bt_df = slice_by_dates(bt_df, None, test_end)
+    if len(bt_df) <= prefix_rows + 1:
+        raise SystemExit(
+            f"backtest slice has {len(bt_df)} rows (need > {prefix_rows + 1}); check that the "
+            f"config end_date ({c.get('end_date')}) covers the requested window"
+        )
+    first_decision = bt_df["timestamp"].iloc[min(prefix_rows, len(bt_df) - 1)]
+    print(f"Backtest period: {first_decision} → {bt_df['timestamp'].iloc[-1]} "
+          f"({len(bt_df) - prefix_rows} decision bars, +{prefix_rows} warmup)")
     return df, bt_df
 
 
 # ═══════════════════════════════════════════════════════════════════ run
 
+def is_maskable_model(model) -> bool:
+    return "Maskable" in type(model.policy).__name__
+
+
+def model_class_from_zip(path: Path) -> str:
+    """'MaskablePPO' or 'PPO', read from the zip's serialized `policy_class`.
+
+    SB3 stores `data` as JSON; `policy_class[":serialized:"]` is a base64
+    cloudpickle whose bytes contain the class's module path. Checking that field
+    for the sb3_contrib maskable module is targeted (unlike a substring search
+    over the whole blob, which any docstring or kwarg could trip).
+    """
+    import base64
+    import zipfile
+
+    with zipfile.ZipFile(path) as zf:
+        data = json.loads(zf.read("data"))
+    serialized = data.get("policy_class", {}).get(":serialized:", "")
+    raw = base64.b64decode(serialized) if serialized else b""
+    return "MaskablePPO" if b"sb3_contrib.common.maskable" in raw else "PPO"
+
+
+def load_model(path: Path):
+    """PPO.load or MaskablePPO.load, decided by the policy class stored in the zip."""
+    from sb3_contrib import MaskablePPO
+    from stable_baselines3 import PPO
+
+    cls = MaskablePPO if model_class_from_zip(path) == "MaskablePPO" else PPO
+    print(f"Loading {cls.__name__} from {path}...")
+    return cls.load(str(path))
+
+
+def make_policy_act_fn(model):
+    """Deterministic (argmax) action + probs; honours env.action_masks() for MaskablePPO."""
+    from stable_baselines3.common.utils import obs_as_tensor
+
+    maskable = is_maskable_model(model)
+
+    def act(obs: np.ndarray, env: SignalLayeredEnv) -> tuple[int, list[float]]:
+        obs_t = obs_as_tensor(obs[None], model.policy.device)
+        with torch.no_grad():
+            if maskable:
+                dist = model.policy.get_distribution(
+                    obs_t, action_masks=env.action_masks()[None]
+                )
+            else:
+                dist = model.policy.get_distribution(obs_t)
+            probs = dist.distribution.probs.cpu().numpy().squeeze().tolist()
+        return int(np.argmax(probs)), probs
+
+    return act
+
+
 def run_backtest(
-    model,
+    act_fn,
     env: SignalLayeredEnv,
     df_bt: pd.DataFrame,
     signal_cols: list[str],
@@ -135,11 +265,12 @@ def run_backtest(
     """
     Full deterministic rollout. Returns (steps_log, trades_log).
 
+    act_fn(obs, env) -> (action, probs | None). Trades are tracked on the
+    *executed* action (env may override under min_hold / cooldown / stop).
+
     steps_log: one entry per env step — full TC-C1 attribution.jsonl spec.
     trades_log: entry per position change — for trade_report.md.
     """
-    from stable_baselines3.common.utils import obs_as_tensor
-
     obs, _ = env.reset()
     steps_log: list[dict] = []
     prev_target: float | None = None
@@ -157,16 +288,13 @@ def run_backtest(
         sig_vals = {col: float(df_bt.loc[step_idx, col]) for col in signal_cols
                     if step_idx < len(df_bt)}
 
-        # Policy inference — get action probs as well
-        obs_t = obs_as_tensor(obs[None], model.policy.device)
-        with torch.no_grad():
-            dist = model.policy.get_distribution(obs_t)
-            probs = dist.distribution.probs.cpu().numpy().squeeze().tolist()
-        action = int(np.argmax(probs))  # deterministic = argmax
+        action, probs = act_fn(obs, env)
 
-        obs, reward, done, _, info = env.step(action)
+        obs, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+        executed = int(env._prev_action)
 
-        target_ratio = TARGET_POSITION[action]
+        target_ratio = TARGET_POSITION[executed]
         rb = info["reward_breakdown"]
 
         # ── State vector (mirrors §5.3 / TC-C1 spec)
@@ -193,8 +321,9 @@ def run_backtest(
             "signals": sig_vals,
             "state": state,
             "action": action,
+            "action_executed": executed,
             "target_ratio": target_ratio,
-            "action_probs": [round(p, 5) for p in probs],
+            "action_probs": [round(p, 5) for p in probs] if probs is not None else None,
             "reward": float(reward),
             "reward_breakdown": {k: float(v) for k, v in rb.items()},
             "stop_loss_triggered": bool(info.get("stop_loss_triggered", False)),
@@ -257,6 +386,92 @@ def run_backtest(
     return steps_log, trades_log
 
 
+# ═══════════════════════════════════════════════════════════════════ baselines
+
+def summarise(steps_log: list[dict], trades_log: list[dict], periods_per_year: int) -> dict:
+    """Common metrics for the PPO run and every baseline (same definitions)."""
+    rets = np.array([s["reward_breakdown"]["log_return"] for s in steps_log])
+    rewards = np.array([s["reward"] for s in steps_log])
+    pv = 10_000.0 * np.exp(np.concatenate([[0.0], np.cumsum(rets)]))
+    return {
+        "total_return": float(pv[-1] / pv[0] - 1),
+        "max_drawdown": float(np.min(pv / np.maximum.accumulate(pv)) - 1),
+        "sharpe": annualised_sharpe(rets, periods_per_year),
+        "trades": len(trades_log),
+        "steps": len(steps_log),
+        "mean_reward": float(rewards.mean()) if len(rewards) else 0.0,
+    }
+
+
+def run_baselines(
+    bt_df: pd.DataFrame,
+    signal_cols: list[str],
+    env_cfg: dict,
+    periods_per_year: int,
+    policy_act_fn=None,
+    full_df: pd.DataFrame | None = None,
+) -> dict[str, dict]:
+    """Reference strategies on the same slice.
+
+    * buy_and_hold — pure price path from the first decision bar, one entry fee.
+    * gate_only — Spider's regime gate alone (100 % when UTC daily close > SMA200).
+    * ppo_gate — the policy with the gate clamping it to 0 % (≈ Spider production).
+    * rule_4h_trend — `RULE_SIGNAL > 0 → 100 %, else 0 %` through the env
+      (so it pays the same commission / stop / min_hold as the agent).
+    * const_p — hold a fixed target through the env; `mean_reward` per step
+      across p is the reward table used to sanity-check `risk_aversion_coef`.
+    """
+    out: dict[str, dict] = {}
+    gate = daily_sma_gate(full_df if full_df is not None else bt_df, bt_df)
+
+    def rollout(name: str, act_fn) -> None:
+        env = SignalLayeredEnv(bt_df, signal_cols=signal_cols, **env_cfg)
+        steps, trades = run_backtest(act_fn, env, bt_df, signal_cols)
+        out[name] = summarise(steps, trades, periods_per_year)
+
+    # pure buy & hold
+    probe = SignalLayeredEnv(bt_df, signal_cols=signal_cols, **env_cfg)
+    start = probe._min_start()
+    close = probe._close
+    log_rets = np.diff(np.log(close[start:]))
+    commission = float(env_cfg.get("commission", 0.0005))
+    pv = 10_000.0 * (1 - commission) * np.exp(np.concatenate([[0.0], np.cumsum(log_rets)]))
+    out["buy_and_hold"] = {
+        "total_return": float(pv[-1] / 10_000.0 - 1),
+        "max_drawdown": float(np.min(pv / np.maximum.accumulate(pv)) - 1),
+        "sharpe": annualised_sharpe(log_rets, periods_per_year),
+        "trades": 1, "steps": int(len(log_rets)), "mean_reward": float("nan"),
+    }
+
+    rollout("gate_only", gated(lambda obs, env: (4, None), gate))
+    if policy_act_fn is not None:
+        rollout("ppo_gate", gated(policy_act_fn, gate))
+
+    if RULE_SIGNAL in signal_cols:
+        col = bt_df[RULE_SIGNAL].to_numpy()
+
+        def rule_act(obs, env):
+            return (4 if col[env.current_step] > 0 else 0), None
+
+        rollout("rule_4h_trend", rule_act)
+
+    for a in range(5):
+        rollout(f"const_{int(TARGET_POSITION[a] * 100)}pct", lambda obs, env, a=a: (a, None))
+
+    return out
+
+
+def format_baseline_table(ppo: dict, baselines: dict[str, dict]) -> list[str]:
+    rows = [("ppo (this run)", ppo)] + list(baselines.items())
+    lines = ["| Strategy | Total return | Max DD | Sharpe | Trades | mean reward/step |",
+             "|----------|-------------:|-------:|-------:|-------:|-----------------:|"]
+    for name, m in rows:
+        mr = "—" if m["mean_reward"] != m["mean_reward"] else f"{m['mean_reward']:+.5f}"
+        lines.append(f"| {name} | {m['total_return']:+.2%} | {m['max_drawdown']:.2%} | "
+                     f"{m['sharpe']:.3f} | {m['trades']} | {mr} |")
+    return lines
+
+
 # ═══════════════════════════════════════════════════════════════════ reports
 
 def write_attribution_jsonl(steps_log: list[dict], out_path: Path) -> None:
@@ -273,15 +488,14 @@ def write_trade_report(
     env: SignalLayeredEnv,
     signal_cols: list[str],
     out_path: Path,
+    *,
+    periods_per_year: int,
+    period_label: str = "",
+    baselines: dict[str, dict] | None = None,
 ) -> None:
-    """TC-C2 compliant trade_report.md."""
+    """TC-C2 compliant trade_report.md (+ v3 baseline table)."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    pv_series = [10_000.0]
-    for s in steps_log:
-        pv_series.append(pv_series[-1] * np.exp(s["reward_breakdown"]["log_return"]))
-    pv_arr = np.array(pv_series)
-    total_ret = pv_arr[-1] / pv_arr[0] - 1
-    max_dd = np.min(pv_arr / np.maximum.accumulate(pv_arr)) - 1
+    m = summarise(steps_log, trades_log, periods_per_year)
     wins = [t for t in trades_log if t.get("pnl_pct", 0) > 0]
     win_rate = len(wins) / max(len(trades_log), 1)
     gross_profit = sum(t["pnl_pct"] for t in wins)
@@ -289,24 +503,33 @@ def write_trade_report(
                          if t.get("pnl_pct", 0) <= 0))
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
 
-    # Compute simple Sharpe from step log_returns
-    rets = np.array([s["reward_breakdown"]["log_return"] for s in steps_log])
-    sharpe = (rets.mean() / (rets.std() + 1e-10)) * np.sqrt(2190)
-
     lines: list[str] = []
     lines.append("# Signal-Layered Backtest Report\n")
-    lines.append(f"Generated: `{dt.datetime.now().isoformat(timespec='seconds')}`\n")
+    lines.append(f"Generated: `{dt.datetime.now().isoformat(timespec='seconds')}`  ")
+    if period_label:
+        lines.append(f"Period: `{period_label}`  ")
+    lines.append(f"Sharpe annualisation: sqrt({periods_per_year}) bars/year\n")
     lines.append("## Summary\n")
     lines.append(f"| Metric | Value |")
     lines.append(f"|--------|-------|")
-    lines.append(f"| Total return | {total_ret:+.2%} |")
-    lines.append(f"| Max drawdown | {max_dd:.2%} |")
-    lines.append(f"| Sharpe (annualised) | {sharpe:.3f} |")
+    lines.append(f"| Total return | {m['total_return']:+.2%} |")
+    lines.append(f"| Max drawdown | {m['max_drawdown']:.2%} |")
+    lines.append(f"| Sharpe (annualised) | {m['sharpe']:.3f} |")
     lines.append(f"| Trades | {len(trades_log)} |")
     lines.append(f"| Win rate | {win_rate:.1%} |")
     lines.append(f"| Profit factor | {profit_factor:.2f} |")
     lines.append(f"| Steps | {len(steps_log):,} |")
+    lines.append(f"| Mean reward / step | {m['mean_reward']:+.5f} |")
     lines.append("")
+
+    if baselines:
+        lines.append("## Baselines (same slice, same env costs)\n")
+        lines.extend(format_baseline_table(m, baselines))
+        lines.append("")
+        lines.append("`const_*` rows hold a fixed target through the env (ATR stop still "
+                     "active); their `mean reward/step` spread is the exposure tax implied "
+                     "by `risk_aversion_coef` — it should be small relative to plausible alpha.")
+        lines.append("")
 
     # Action distribution
     from collections import Counter
@@ -451,6 +674,8 @@ def main() -> int:
     parser.add_argument("--run-name", default=None,
                         help="Output directory under models/saved/. "
                              "Defaults to model parent dir name.")
+    parser.add_argument("--no-baselines", action="store_true",
+                        help="Skip buy&hold / rule / constant-position baselines.")
     args = parser.parse_args()
 
     if not args.model.exists():
@@ -469,21 +694,28 @@ def main() -> int:
     if needs_contracts:
         print("[backtest] candidate pool contains contract signals → enabling cross-db merge")
 
-    _, bt_df = load_data(cfg, args.test_start, args.test_end, with_contracts=needs_contracts)
-
-    _ALLOWED = {"window_size", "initial_balance", "commission",
-                "risk_aversion_coef", "excess_return_coef",
-                "stop_atr_mult", "stop_cooldown_steps"}
-    env_cfg = {k: v for k, v in cfg["env"].items() if k in _ALLOWED}
+    env_cfg = {k: v for k, v in cfg["env"].items() if k in _ALLOWED_ENV_KEYS}
     env_cfg["random_start"] = False
+    env_cfg["max_episode_steps"] = None       # one uninterrupted pass
+    prefix_rows = SignalLayeredEnv.warmup_rows(env_cfg.get("window_size", 24))
+    periods_per_year = bars_per_year(cfg["crypto"].get("timeframe", "4h"))
+
+    full_df, bt_df = load_data(cfg, args.test_start, args.test_end,
+                               with_contracts=needs_contracts, prefix_rows=prefix_rows)
+    period_label = (f"{bt_df['timestamp'].iloc[prefix_rows]} → "
+                    f"{bt_df['timestamp'].iloc[-1]}")
 
     env = SignalLayeredEnv(bt_df, signal_cols=signal_cols, **env_cfg)
+    model = load_model(args.model)
 
-    from stable_baselines3 import PPO
-    print(f"Loading model from {args.model}...")
-    model = PPO.load(str(args.model))
+    policy_act = make_policy_act_fn(model)
+    steps_log, trades_log = run_backtest(policy_act, env, bt_df, signal_cols)
 
-    steps_log, trades_log = run_backtest(model, env, bt_df, signal_cols)
+    baselines = None
+    if not args.no_baselines:
+        print("Running baselines...")
+        baselines = run_baselines(bt_df, signal_cols, env_cfg, periods_per_year,
+                                  policy_act_fn=policy_act, full_df=full_df)
 
     run_name = args.run_name or args.model.parent.name
     out_dir = REPO_ROOT / "models" / "saved" / run_name
@@ -491,20 +723,28 @@ def main() -> int:
 
     write_attribution_jsonl(steps_log, log_dir / "attribution.jsonl")
     write_trade_report(trades_log, steps_log, env, signal_cols,
-                       out_dir / "trade_report.md")
+                       out_dir / "trade_report.md",
+                       periods_per_year=periods_per_year,
+                       period_label=period_label, baselines=baselines)
     write_signal_plot(steps_log, trades_log, signal_cols,
                       out_dir / "signal_decision_plot.png")
 
-    # Print summary
-    pv_end = env._portfolio_value(float(env._close[env.current_step]))
-    total_ret = pv_end / env.initial_balance - 1
-    rets = np.array([s["reward_breakdown"]["log_return"] for s in steps_log])
-    sharpe = (rets.mean() / (rets.std() + 1e-10)) * np.sqrt(2190)
-    print(f"\n── Backtest Summary ──────────────────")
-    print(f"  Steps: {len(steps_log):,}")
-    print(f"  Trades: {len(trades_log)}")
-    print(f"  Total return: {total_ret:+.2%}")
-    print(f"  Sharpe (ann.): {sharpe:.3f}")
+    summary = summarise(steps_log, trades_log, periods_per_year)
+    if baselines is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "baselines.json").write_text(
+            json.dumps({"period": period_label, "periods_per_year": periods_per_year,
+                        "ppo": summary, "baselines": baselines}, indent=2),
+            encoding="utf-8",
+        )
+
+    print(f"\n── Backtest Summary ({period_label}) ──")
+    print(f"  Steps: {summary['steps']:,}   Trades: {summary['trades']}")
+    print(f"  Total return: {summary['total_return']:+.2%}   "
+          f"Max DD: {summary['max_drawdown']:.2%}   "
+          f"Sharpe (ann., {periods_per_year}): {summary['sharpe']:.3f}")
+    if baselines:
+        print("\n".join(format_baseline_table(summary, baselines)))
 
     return 0
 

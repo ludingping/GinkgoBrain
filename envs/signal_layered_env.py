@@ -6,8 +6,18 @@ Implements §5.1–5.4 of `docs/GinkgoBrain/信号分层架构与可解释RL设�
 - Observation:     (window_size, n_signals + 4_state) — only sig_* columns +
                    4 state features. No raw OHLCV or indicator columns.
 - ATR stop loss:   env-side safety net, not an RL action. Cooldown after stop.
+                   `stop_atr_mult <= 0` disables it (paper/live sides that
+                   implement no stop must train without one).
 - Reward:          log_return + asymmetric risk aversion + excess_return
-                   - trade_cost. No inertia / missed-opportunity / stop penalty.
+                   - trade_cost - optional inertia / trade-switch penalties.
+- min_hold_steps:  (v3) after an agent-chosen position switch the action is
+                   frozen for N steps. Exposed via `action_masks()` for
+                   MaskablePPO and also enforced inside `step()` so plain PPO /
+                   backtests see identical dynamics. Stop loss bypasses the lock.
+- max_episode_steps: (v3) optional truncation so `random_start` episodes cover
+                   the training range uniformly instead of running to df end.
+- Observation window ends at the *current* bar (v3): close[t] is known when the
+  bar closes, so sig_*[t] is legal input for the decision executed at close[t].
 
 Keeps the legacy StockTradingEnv / CryptoTradingEnv untouched — new paradigm
 coexists with the old one and is selected via `--paradigm signal_layered`.
@@ -77,6 +87,8 @@ class SignalLayeredEnv(gym.Env):
         stop_atr_mult: float = 2.0,
         stop_cooldown_steps: int = 3,
         random_start: bool = False,
+        min_hold_steps: int = 0,
+        max_episode_steps: int | None = None,
         render_mode: str | None = None,
     ):
         super().__init__()
@@ -103,6 +115,10 @@ class SignalLayeredEnv(gym.Env):
         self.stop_atr_mult = float(stop_atr_mult)
         self.stop_cooldown_steps = int(stop_cooldown_steps)
         self.random_start = bool(random_start)
+        self.min_hold_steps = max(0, int(min_hold_steps))
+        self.max_episode_steps = (
+            int(max_episode_steps) if max_episode_steps is not None else None
+        )
         self.render_mode = render_mode
 
         # Pre-extract signal matrix (float32) for fast obs slicing.
@@ -128,6 +144,8 @@ class SignalLayeredEnv(gym.Env):
         self._prev_action: int = 0
         self._entry_price: float | None = None
         self._steps_since_stop: int = self.window_size  # "long ago"
+        self._steps_since_trade: int = self.min_hold_steps  # not locked at start
+        self._episode_steps: int = 0
         self._cum_log_return: float = 0.0
         self.current_step: int = self._min_start()
         self.total_reward: float = 0.0
@@ -140,9 +158,16 @@ class SignalLayeredEnv(gym.Env):
         # steps_since_stop_norm, cum_log_return_clipped).
         self._state_history = np.zeros((self.window_size, STATE_DIM), dtype=np.float32)
 
+    @staticmethod
+    def warmup_rows(window_size: int) -> int:
+        """Rows the env skips at the head of any DataFrame before its first
+        decision. Callers slicing val/test sets by date should prepend exactly
+        this many rows so the first decision lands on the requested start."""
+        return SIGNAL_WARMUP_WINDOW + int(window_size) + SAFETY_BUFFER
+
     def _min_start(self) -> int:
         """Earliest legal step; enforces warmup + window + buffer (§5.5.2)."""
-        return SIGNAL_WARMUP_WINDOW + self.window_size + SAFETY_BUFFER
+        return self.warmup_rows(self.window_size)
 
     # ------------------------------------------------------------------ reset
 
@@ -170,8 +195,10 @@ class SignalLayeredEnv(gym.Env):
         prev_portfolio = self._portfolio_value(price)
 
         # ── 1. ATR stop loss (safety net, runs before RL action) ──────────
+        # stop_atr_mult <= 0 disables it (serving sides without a stop must
+        # train without one too; 0 would otherwise mean "stop on any loss").
         self._last_stop_triggered = False
-        if self.position > 0 and self._entry_price is not None:
+        if self.stop_atr_mult > 0 and self.position > 0 and self._entry_price is not None:
             loss_pct = (price - self._entry_price) / self._entry_price
             stop_threshold = -(self.stop_atr_mult * atr / self._entry_price)
             if loss_pct < stop_threshold:
@@ -188,12 +215,25 @@ class SignalLayeredEnv(gym.Env):
         if in_cooldown and action != 0:
             action = 0
 
+        # ── 2b. min_hold lock: freeze the action after an agent switch ───
+        # Mirrors `action_masks()`; enforced here too so unmasked callers
+        # (plain PPO, backtests) see the same dynamics. A stop already forced
+        # action=0 above and must not be undone by the lock.
+        if self._is_hold_locked() and not self._last_stop_triggered and not in_cooldown:
+            action = self._prev_action
+
         # ── 3. Execute RL action ─────────────────────────────────────────
         self._execute_action(action, price)
 
         # ── 4. Advance time and recompute portfolio ──────────────────────
         self.current_step += 1
-        done = self.current_step >= len(self.df) - 1
+        self._episode_steps += 1
+        terminated = self.current_step >= len(self.df) - 1
+        truncated = (
+            not terminated
+            and self.max_episode_steps is not None
+            and self._episode_steps >= self.max_episode_steps
+        )
         new_price = float(self._close[self.current_step])
         new_portfolio = self._portfolio_value(new_price)
 
@@ -211,12 +251,19 @@ class SignalLayeredEnv(gym.Env):
 
         trade_cost_term = -self._last_trade_cost
 
-        # ── 5b. Trade-frequency 惩罚（防 PPO 在 5min noise 上反复横跳）──
+        # ── 5b. Trade-frequency 惩罚（防 PPO 在 noise 上反复横跳）──────────
         # action_inertia: 仓位档位变化幅度的连续惩罚（|target_ratio - prev_target_ratio|）
         # trade_penalty: 任何 action 切换的固定惩罚（离散，每次切换固定扣分）
-        action_delta = abs(TARGET_POSITION[action] - TARGET_POSITION[self._prev_action])
-        inertia_term = -self.action_inertia_coef * action_delta
-        trade_pen_term = -self.trade_penalty_coef * (1.0 if action != self._prev_action else 0.0)
+        # 只惩罚 agent 自己选择的切换：止损强平不是 agent 的决定；min_hold
+        # 锁定步 action == _prev_action，两项自然为 0。
+        switched = action != self._prev_action
+        if switched and not self._last_stop_triggered:
+            action_delta = abs(TARGET_POSITION[action] - TARGET_POSITION[self._prev_action])
+            inertia_term = -self.action_inertia_coef * action_delta
+            trade_pen_term = -self.trade_penalty_coef
+        else:
+            inertia_term = 0.0
+            trade_pen_term = 0.0
 
         reward = log_return + risk_adj + excess + trade_cost_term + inertia_term + trade_pen_term
         self._last_reward_breakdown = {
@@ -231,6 +278,15 @@ class SignalLayeredEnv(gym.Env):
         self._cum_log_return += log_return
         if not self._last_stop_triggered:
             self._steps_since_stop = min(self._steps_since_stop + 1, self.window_size)
+        # Lock counter keys off the *agent's* action switch, not off `trades`
+        # growth (a 2 % drift rebalance never re-locks) and not off a stop-out
+        # (the stop's cooldown governs re-entry; the lock must not stack on it).
+        if self._last_stop_triggered:
+            self._steps_since_trade = self.min_hold_steps   # stop cancels a pending lock
+        elif switched:
+            self._steps_since_trade = 0
+        else:
+            self._steps_since_trade = min(self._steps_since_trade + 1, self.min_hold_steps)
         self._prev_action = action
 
         # ── 6. Roll state history forward ────────────────────────────────
@@ -238,7 +294,28 @@ class SignalLayeredEnv(gym.Env):
 
         obs = self._get_obs()
         info = self._get_info()
-        return obs, reward, done, False, info
+        return obs, reward, terminated, truncated, info
+
+    # ------------------------------------------------------------------ masks
+
+    def _is_hold_locked(self) -> bool:
+        return self._steps_since_trade < self.min_hold_steps
+
+    def action_masks(self) -> np.ndarray:
+        """Legal-action mask for MaskablePPO (sb3_contrib `ActionMasker`).
+
+        One-hot on the previous action while the min_hold lock is active, one-hot
+        on 0 during stop cooldown, otherwise all True. `step()` applies the same
+        rules, so masked and unmasked rollouts are identical.
+        """
+        mask = np.ones(self.action_space.n, dtype=bool)
+        if self._steps_since_stop < self.stop_cooldown_steps:
+            mask[:] = False
+            mask[0] = True
+        elif self._is_hold_locked():
+            mask[:] = False
+            mask[self._prev_action] = True
+        return mask
 
     # ------------------------------------------------------------------ action
 
@@ -325,14 +402,16 @@ class SignalLayeredEnv(gym.Env):
         self._state_history[-1] = [pos_ratio, unrealized, steps_norm, cum_clip]
 
     def _get_obs(self) -> np.ndarray:
-        lo = self.current_step - self.window_size
-        hi = self.current_step
+        # Window is inclusive of the current bar: [t - w + 1, t]. Signals at t
+        # are computed from close[t], which is the price the decision fills at.
+        hi = self.current_step + 1
+        lo = hi - self.window_size
         if lo < 0:
-            # should not happen once _min_start is respected
-            sig_window = np.zeros((self.window_size, self.n_signals), dtype=np.float32)
-            sig_window[-hi:] = self._sig_mat[:hi]
-        else:
-            sig_window = self._sig_mat[lo:hi]
+            raise RuntimeError(
+                f"current_step={self.current_step} < window_size-1; "
+                "_min_start() must be respected (df shorter than warmup_rows?)"
+            )
+        sig_window = self._sig_mat[lo:hi]
         obs = np.concatenate([sig_window, self._state_history], axis=1)
         return obs.astype(np.float32, copy=False)
 
@@ -356,6 +435,11 @@ class SignalLayeredEnv(gym.Env):
             "reward_breakdown": dict(self._last_reward_breakdown),
             "stop_loss_triggered": self._last_stop_triggered,
             "steps_since_stop": self._steps_since_stop,
+            # Episode aggregates — read by the trainer's eval-stats callback
+            # from the terminal info (the VecEnv auto-resets right after).
+            "n_trades": len(self.trades),
+            "n_stops": len(self.stop_loss_events),
+            "cum_log_return": self._cum_log_return,
         }
 
     def render(self):

@@ -12,10 +12,25 @@ from utils.db import (
     read_open_interest,
 )
 from utils.signals import add_contract_signals, add_signals
+from utils.splits import split_by_dates
 from agents.ppo_shared import resample_ohlcv
 from envs import StockTradingEnv, CryptoTradingEnv, SignalLayeredEnv, load_signal_list
 from agents import Trainer, RLlibTrainer
 from agents.trainer import TradingCNN
+
+
+# Keys of the merged `env:` section that SignalLayeredEnv accepts. Everything
+# else (legacy end-to-end keys from default.yaml) is dropped with a notice.
+# NOTE: default.yaml defines some of these (e.g. trade_penalty_coef=1.0) — a
+# stage config must pin every key it cares about, or it inherits the default.
+_ALLOWED_ENV_KEYS = frozenset({
+    "window_size", "initial_balance", "commission",
+    "risk_aversion_coef", "excess_return_coef",
+    "action_inertia_coef", "trade_penalty_coef",
+    "stop_atr_mult", "stop_cooldown_steps",
+    "min_hold_steps", "max_episode_steps",
+    "random_start", "render_mode",
+})
 
 
 def split_df(df: pd.DataFrame, ratio: float):
@@ -272,21 +287,25 @@ def _train_signal_layered(cfg, train_cfg, env_cfg, backend, args) -> None:
     if missing:
         raise ValueError(f"add_signals did not produce required columns: {missing}")
 
-    train_df, eval_df = split_df(df, c.get("train_ratio", 0.75))
-
-    # Drop legacy keys that default.yaml injects for the end-to-end env but
-    # SignalLayeredEnv does not accept.
-    _ALLOWED_ENV_KEYS = {
-        "window_size", "initial_balance", "commission",
-        "risk_aversion_coef", "excess_return_coef",
-        "action_inertia_coef", "trade_penalty_coef",
-        "stop_atr_mult", "stop_cooldown_steps",
-        "random_start", "render_mode",
-    }
     clean_env_cfg = {k: v for k, v in env_cfg.items() if k in _ALLOWED_ENV_KEYS}
     dropped = set(env_cfg) - _ALLOWED_ENV_KEYS
     if dropped:
         print(f"[signal_layered] ignoring legacy env keys: {sorted(dropped)}")
+
+    # Date-pinned split (v3) when `val_start` is given; the optional `test_start`
+    # slice is held out from both training and best-model selection. Falls
+    # back to the legacy ratio split otherwise.
+    if c.get("val_start"):
+        prefix = SignalLayeredEnv.warmup_rows(clean_env_cfg.get("window_size", 24))
+        sp = split_by_dates(df, c["val_start"], c.get("test_start"),
+                            prefix_rows=prefix)
+        train_df, eval_df = sp.train, sp.val
+        print(f"[split] train={len(train_df)} rows (< {c['val_start']}), "
+              f"val={len(eval_df) - prefix} rows"
+              + (f", test={len(sp.test) - prefix} rows (held out, >= {c['test_start']})"
+                 if sp.test is not None else ""))
+    else:
+        train_df, eval_df = split_df(df, c.get("train_ratio", 0.75))
 
     def make_train_env():
         return SignalLayeredEnv(train_df, signal_cols=signal_cols, **clean_env_cfg)
@@ -294,10 +313,15 @@ def _train_signal_layered(cfg, train_cfg, env_cfg, backend, args) -> None:
     def make_eval_env():
         eval_kwargs = dict(clean_env_cfg)
         eval_kwargs["random_start"] = False
+        eval_kwargs["max_episode_steps"] = None   # eval = one pass over the slice
         return SignalLayeredEnv(eval_df, signal_cols=signal_cols, **eval_kwargs)
 
     algo_kwargs = dict(train_cfg.get("algo_kwargs", {}))
     # signal-layered 观察空间是浓缩特征，走默认 MLP；不注入 TradingCNN。
+
+    algo = train_cfg["algo"]
+    if train_cfg.get("action_masking") and algo.lower() == "ppo":
+        algo = "maskable_ppo"   # sb3_contrib; env.action_masks() enforces min_hold/cooldown
 
     run_name = args.run_name or (
         f"{c['symbol'].replace('/', '')}_signal_layered_{c.get('timeframe', '4h')}"
@@ -306,12 +330,13 @@ def _train_signal_layered(cfg, train_cfg, env_cfg, backend, args) -> None:
     trainer = Trainer(
         env_fn=make_train_env,
         eval_env_fn=make_eval_env,
-        algo=train_cfg["algo"],
+        algo=algo,
         run_name=run_name,
         policy=train_cfg.get("policy", "MlpPolicy"),
         algo_kwargs=algo_kwargs,
         n_envs=train_cfg.get("n_envs", 1),
         normalize_obs=False,   # sig_* 已 ∈ [-1, 1]，state 已 clip
+        n_eval_episodes=1,     # deterministic + fixed start → extra episodes are identical
     )
     print(
         f"[SB3][signal_layered] Training {run_name} for "
