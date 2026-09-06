@@ -39,7 +39,7 @@ from sklearn.metrics import roc_auc_score
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.backtest_signal_layered import daily_sma_distance, daily_sma_gate  # noqa: E402
+from scripts.backtest_signal_layered import DAILY_FEATURES, daily_sma_gate    # noqa: E402
 from scripts.signal_linear_baseline import load_df_from_config           # noqa: E402
 from utils.data_loader import required_contract_sources                  # noqa: E402
 from utils.indicators import add_indicators                              # noqa: E402
@@ -123,7 +123,7 @@ DIST_COL = "dist_sma200"          # close / UTC-daily SMA200 − 1 of the last c
 
 
 def add_probe_features(df: pd.DataFrame, names: list[str], timeframe: str) -> pd.DataFrame:
-    """Add requested probe-only features (and `dist_sma200` when referenced)."""
+    """Add requested probe-only features and any daily gate-aligned features referenced."""
     out = df.copy()
     for n in names:
         if n in PROBE_FEATURES:
@@ -131,8 +131,8 @@ def add_probe_features(df: pd.DataFrame, names: list[str], timeframe: str) -> pd
             if raw not in out.columns:
                 raise ValueError(f"probe feature '{n}' needs a {raw} column")
             out[n] = PROBE_FEATURES[n](out, timeframe)
-        elif n == DIST_COL and DIST_COL not in out.columns:
-            out[DIST_COL] = daily_sma_distance(out, out)
+        elif n in DAILY_FEATURES and n not in out.columns:
+            out[n] = DAILY_FEATURES[n](out, out)     # df is the full frame → warmup satisfied
     return out
 
 

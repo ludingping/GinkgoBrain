@@ -101,20 +101,58 @@ def daily_sma_gate(full_df: pd.DataFrame, bt_df: pd.DataFrame,
     return ok_daily.reindex(last_closed_day, fill_value=False).to_numpy(dtype=bool)
 
 
-def daily_sma_distance(full_df: pd.DataFrame, bt_df: pd.DataFrame,
-                       sma_days: int = GATE_SMA_DAYS) -> np.ndarray:
-    """Per-bar `close / SMA(sma_days) − 1` of the last *closed* UTC day, aligned to
-    bt_df exactly like :func:`daily_sma_gate` (NaN while the SMA is warming up).
-    Trend-strength proxy for gate × signal interaction rules."""
+def _daily_ohlc(full_df: pd.DataFrame) -> pd.DataFrame:
+    """UTC daily OHLC from the (finer) frame — same resample convention as the gate."""
     ts = pd.DatetimeIndex(full_df["timestamp"]).tz_convert("UTC")
-    close = pd.Series(full_df["close"].to_numpy(), index=ts)
-    daily = close.resample("1D", closed="left", label="left").last()
-    dist = daily / daily.rolling(sma_days).mean() - 1.0
+    px = pd.DataFrame({c: full_df[c].to_numpy() if c in full_df.columns else full_df["close"].to_numpy()
+                       for c in ("open", "high", "low", "close")}, index=ts)   # close-only frames OK
+    return px.resample("1D", closed="left", label="left").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last"})
 
+
+def _align_last_closed_day(daily: pd.Series, bt_df: pd.DataFrame) -> np.ndarray:
+    """Value of the last *fully closed* UTC day for each bt_df bar (NaN if unavailable)."""
     bt_ts = pd.DatetimeIndex(bt_df["timestamp"]).tz_convert("UTC")
     bar = pd.Series(bt_ts).diff().dropna().mode().iloc[0]
     last_closed_day = (bt_ts + bar).floor("D") - pd.Timedelta(days=1)
-    return dist.reindex(last_closed_day).to_numpy(dtype=float)
+    return daily.reindex(last_closed_day).to_numpy(dtype=float)
+
+
+def daily_sma_distance(full_df: pd.DataFrame, bt_df: pd.DataFrame,
+                       sma_days: int = GATE_SMA_DAYS) -> np.ndarray:
+    """`close / SMA(sma_days) − 1` of the last closed UTC day (NaN during warmup)."""
+    d = _daily_ohlc(full_df)["close"]
+    return _align_last_closed_day(d / d.rolling(sma_days).mean() - 1.0, bt_df)
+
+
+def daily_drawdown_atr(full_df: pd.DataFrame, bt_df: pd.DataFrame,
+                       lookback_days: int = 20, atr_days: int = 14) -> np.ndarray:
+    """Drawdown from the `lookback_days` closing high, in units of daily ATR(atr_days)
+    expressed as a fraction of close. ≤ 0; 0 at a new high. H3' exit E2."""
+    d = _daily_ohlc(full_df)
+    prev_c = d["close"].shift(1)
+    tr = pd.concat([d["high"] - d["low"], (d["high"] - prev_c).abs(),
+                    (d["low"] - prev_c).abs()], axis=1).max(axis=1)
+    atr_pct = tr.rolling(atr_days).mean() / d["close"]
+    dd = d["close"] / d["close"].rolling(lookback_days).max() - 1.0
+    return _align_last_closed_day(dd / atr_pct, bt_df)
+
+
+def daily_low_distance(full_df: pd.DataFrame, bt_df: pd.DataFrame,
+                       lookback_days: int = 20) -> np.ndarray:
+    """`close / min(low of the *prior* lookback_days) − 1`; ≤ 0 means a new low. H3' exit E3."""
+    d = _daily_ohlc(full_df)
+    prior_low = d["low"].shift(1).rolling(lookback_days).min()
+    return _align_last_closed_day(d["close"] / prior_low - 1.0, bt_df)
+
+
+# Daily-derived, gate-aligned features usable by rules and the IC probe: name → fn(full_df, bt_df)
+DAILY_FEATURES = {
+    "dist_sma200": lambda full, bt: daily_sma_distance(full, bt, 200),
+    "dist_sma50": lambda full, bt: daily_sma_distance(full, bt, 50),
+    "dd20_atr": lambda full, bt: daily_drawdown_atr(full, bt, 20, 14),
+    "dist_low20": lambda full, bt: daily_low_distance(full, bt, 20),
+}
 
 
 def gated(act_fn, gate: np.ndarray):

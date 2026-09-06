@@ -20,7 +20,7 @@ Rule grammar:  name[:k=v,k=v,...]
                                     gate on & signal (>|<) thr [& signal2 (>|<) thr2] → `level`
                                     (0-4 = 0/25/50/75/100 %), gate on otherwise → 100 %, gate off → 0 %
                                     signals may be pool columns, raw contract columns, probe features
-                                    (funding_cum_3d_z, …) or dist_sma200
+                                    (funding_cum_3d_z, …) or daily features (dist_sma200, dist_sma50, dd20_atr, dist_low20)
     const:level=                    fixed target (sanity)
 Outputs reports/backtest_rules_<tag>.md + .json (one table per period).
 """
@@ -44,11 +44,11 @@ from envs.signal_layered_env import (                                  # noqa: E
     SignalLayeredEnv, TARGET_POSITION, load_signal_list,
 )
 from scripts.backtest_signal_layered import (                          # noqa: E402
-    _ALLOWED_ENV_KEYS, buy_and_hold_metrics, daily_sma_distance, daily_sma_gate,
+    _ALLOWED_ENV_KEYS, DAILY_FEATURES, buy_and_hold_metrics, daily_sma_gate,
     load_data, run_backtest, summarise,
 )
 from scripts.signal_ic_probe import (                                  # noqa: E402
-    DIST_COL, PROBE_FEATURES, add_probe_features, required_sources as probe_required_sources,
+    PROBE_FEATURES, add_probe_features, required_sources as probe_required_sources,
 )
 from utils.data_loader import (                                        # noqa: E402
     CONTRACT_SOURCE_COLS, required_contract_sources,
@@ -180,8 +180,8 @@ def add_rule_features(full_df: pd.DataFrame, bt_df: pd.DataFrame, specs: list[Ru
     """Materialise probe features / dist_sma200 referenced by the rules onto bt_df."""
     names = [c for sp in specs for c in sp.signals if c in PROBE_FEATURES]
     out = add_probe_features(bt_df, names, timeframe)
-    if any(DIST_COL in sp.signals for sp in specs):
-        out[DIST_COL] = daily_sma_distance(full_df, bt_df)
+    for name in {c for sp in specs for c in sp.signals if c in DAILY_FEATURES}:
+        out[name] = DAILY_FEATURES[name](full_df, bt_df)   # full history → SMA/ATR warmed
     return out
 
 

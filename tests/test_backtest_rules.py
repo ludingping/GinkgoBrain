@@ -152,3 +152,28 @@ def test_add_rule_features_materialises_dist_and_probe_columns() -> None:
     out = add_rule_features(full, bt, specs, "4h")
     assert "dist_sma200" in out.columns and "funding_cum_3d_z" in out.columns
     assert out["dist_sma200"].notna().all()          # 320 days of history → SMA warmed
+
+
+def test_daily_exit_features_semantics() -> None:
+    from scripts.backtest_signal_layered import DAILY_FEATURES, _daily_ohlc
+    full = _synthetic_4h(n_days=120, seed=2)
+    bt = full.iloc[-30 * 6:].reset_index(drop=True)
+    dd = DAILY_FEATURES["dd20_atr"](full, bt)
+    lo = DAILY_FEATURES["dist_low20"](full, bt)
+    s50 = DAILY_FEATURES["dist_sma50"](full, bt)
+    assert np.isfinite(dd).all() and np.isfinite(lo).all() and np.isfinite(s50).all()
+    assert (dd <= 1e-12).all()                                  # drawdown from a high is never positive
+    # independent rebuild of dist_sma50 for the last bar (last closed UTC day)
+    d = _daily_ohlc(full)["close"]
+    last_day = (bt["timestamp"].iloc[-1] + pd.Timedelta("4h")).floor("D") - pd.Timedelta(days=1)
+    expect = d.loc[last_day] / d.rolling(50).mean().loc[last_day] - 1
+    assert s50[-1] == pytest.approx(expect)
+    # a planted crash: 15 % drop on the last full day → new 20-day low and deep ATR drawdown
+    crash = full.copy()
+    last_day_mask = (pd.DatetimeIndex(crash["timestamp"]).tz_convert("UTC").floor("D") == last_day)
+    crash.loc[last_day_mask, ["open", "high", "low", "close"]] *= 0.85
+    bt_c = crash.iloc[-30 * 6:].reset_index(drop=True)
+    assert DAILY_FEATURES["dist_low20"](crash, bt_c)[-1] <= 0.0
+    assert DAILY_FEATURES["dd20_atr"](crash, bt_c)[-1] < -2.0
+    assert DAILY_FEATURES["dist_sma200"](full, bt)[-1] == pytest.approx(
+        d.loc[last_day] / d.rolling(200).mean().loc[last_day] - 1, nan_ok=True)
