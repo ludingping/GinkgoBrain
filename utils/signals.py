@@ -119,7 +119,11 @@ def add_signals(df: pd.DataFrame) -> pd.DataFrame:
     df["sig_vol_bb_position"] = (2.0 * (close - df["bb_lower"]) / bb_range - 1.0).clip(-1, 1)
 
     # ─── Volume group ─────────────────────────────────────────────────
-    df["sig_volume_obv_slope"] = znorm(df["obv"].pct_change(5))
+    # diff, not pct_change: OBV is a running cumsum, so its *level* depends on
+    # where the series starts; pct_change divides by that level and made the
+    # signal flip sign on 40 % of live bars vs training (GinkgoSpider PR #20).
+    # diff cancels the start-dependent offset; znorm restores the scale.
+    df["sig_volume_obv_slope"] = znorm(df["obv"].diff(5))
 
     vol_mean_20 = df["volume"].rolling(20).mean()
     df["sig_volume_ratio"] = znorm(df["volume"] / vol_mean_20)

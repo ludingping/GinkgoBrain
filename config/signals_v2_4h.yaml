@@ -1,0 +1,93 @@
+version: 1
+generated_at: '2026-09-05T23:03:25'
+source:
+  tag: config:elim_4h_train_only.yaml (tf=4h)
+  warmup_window: 100
+  periods_per_year: 2190
+thresholds:
+  sharpe_min: -0.2
+  pearson_abs_max: 0.95
+signals:
+- sig_trend_macd_hist
+- sig_trend_slope_21
+- sig_mom_rsi_trend
+- sig_mom_roc_zscore
+- sig_vol_atr_pct
+- sig_vol_bb_width
+- sig_vol_bb_position
+- sig_volume_obv_slope
+- sig_volume_ratio
+- sig_regime_return_60
+eliminated:
+- signal: sig_mom_stoch_state
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.642 < -0.2
+  sharpe: -0.6419
+- signal: sig_hf_range_position
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.571 < -0.2
+  sharpe: -0.5715
+- signal: sig_hf_body_ratio
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.414 < -0.2
+  sharpe: -0.4141
+- signal: sig_mr_rsi_extreme
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.285 < -0.2
+  sharpe: -0.2854
+- signal: sig_mr_deviation_atr
+  reason: correlation_redundancy
+  detail: '|ρ|=0.997 (+0.997) with sig_trend_price_above_ma (kept: Sharpe=+0.592 vs +0.518)'
+  sharpe: 0.5185
+- signal: sig_trend_price_above_ma
+  reason: correlation_redundancy
+  detail: '|ρ|=0.982 (+0.982) with sig_mom_rsi_trend (kept: Sharpe=+0.649 vs +0.592)'
+  sharpe: 0.5923
+- signal: sig_trend_ema_cross
+  reason: correlation_redundancy
+  detail: '|ρ|=0.978 (+0.978) with sig_trend_slope_21 (kept: Sharpe=+0.850 vs +0.793)'
+  sharpe: 0.7928
+- signal: sig_hf_vol_zscore_24
+  reason: correlation_redundancy
+  detail: '|ρ|=0.961 (+0.961) with sig_volume_ratio (kept: Sharpe=+0.396 vs -0.020)'
+  sharpe: -0.0201
+- signal: sig_mom_rsi_zone
+  reason: correlation_redundancy
+  detail: '|ρ|=0.951 (-0.951) with sig_mom_rsi_trend (kept: Sharpe=+0.649 vs +0.138)'
+  sharpe: 0.1384
+- signal: sig_regime_drawdown
+  reason: manual_exclude
+  detail: --exclude sig_regime_drawdown,sig_mtf_*
+  sharpe: .nan
+- signal: sig_mtf_4h_trend
+  reason: manual_exclude
+  detail: --exclude sig_regime_drawdown,sig_mtf_*
+  sharpe: .nan
+- signal: sig_mtf_1d_regime
+  reason: manual_exclude
+  detail: --exclude sig_regime_drawdown,sig_mtf_*
+  sharpe: .nan
+- signal: sig_funding_current
+  reason: zero_variance
+  detail: constant column in this sample
+  sharpe: .nan
+- signal: sig_funding_trend
+  reason: zero_variance
+  detail: constant column in this sample
+  sharpe: .nan
+- signal: sig_oi_change_zscore
+  reason: zero_variance
+  detail: constant column in this sample
+  sharpe: .nan
+- signal: sig_liq_long_zscore
+  reason: zero_variance
+  detail: constant column in this sample
+  sharpe: .nan
+- signal: sig_liq_short_zscore
+  reason: zero_variance
+  detail: constant column in this sample
+  sharpe: .nan
+- signal: sig_liq_imbalance
+  reason: zero_variance
+  detail: constant column in this sample
+  sharpe: .nan

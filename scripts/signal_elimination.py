@@ -307,6 +307,9 @@ def main() -> int:
     parser.add_argument("--with-contracts", action="store_true",
                         help="跨库 join funding/OI/liquidation 让候选池含合约信号"
                              "（与 signal_linear_baseline.py 对称）")
+    parser.add_argument("--exclude", default="",
+                        help="逗号分隔，从候选池剔除；以 * 结尾按前缀匹配。"
+                             "e.g. --exclude sig_regime_drawdown,sig_mtf_*")
     args = parser.parse_args()
 
     if args.config is not None:
@@ -343,7 +346,28 @@ def main() -> int:
 
     df_post = df.iloc[SIGNAL_WARMUP_WINDOW:].reset_index(drop=True)
     sig_cols = signal_columns(df_post)
-    print(f"Rows post-warmup: {len(df_post):,}, signals: {len(sig_cols)}")
+
+    # Manual exclusions (serving constraints, e.g. sig_mtf_* need more history
+    # than a 500-bar live window; sig_regime_drawdown is constant in bull regimes).
+    patterns = [p.strip() for p in args.exclude.split(",") if p.strip()]
+    excluded_manual = [
+        c for c in sig_cols
+        if any(c == p or (p.endswith("*") and c.startswith(p[:-1])) for p in patterns)
+    ]
+    # Zero-variance columns (e.g. contract signals without --with-contracts are
+    # all 0): Sharpe=0 passes the gate and corr() is NaN, which makes the
+    # greedy sort order undefined → arbitrary eliminations. Drop them first.
+    excluded_const = [
+        c for c in sig_cols
+        if c not in excluded_manual
+        and (df_post[c].isna().all() or float(df_post[c].std()) < 1e-12)  # std() of all-NaN is NaN
+    ]
+    for c in excluded_manual:
+        print(f"  ✗ {c:<32s} excluded (--exclude)")
+    for c in excluded_const:
+        print(f"  ✗ {c:<32s} excluded (zero variance in this sample)")
+    sig_cols = [c for c in sig_cols if c not in excluded_manual and c not in excluded_const]
+    print(f"Rows post-warmup: {len(df_post):,}, candidate signals: {len(sig_cols)}")
 
     sharpe, corr = compute_stats(df_post, sig_cols, periods_per_year)
     kept, eliminated = apply_elimination(
@@ -351,6 +375,16 @@ def main() -> int:
         sharpe_threshold=args.sharpe_threshold,
         corr_threshold=args.corr_threshold,
     )
+    # Surface the pre-filter exclusions in the yaml/log so the served
+    # signals.yaml documents *why* a column is absent.
+    for c in excluded_manual:
+        sharpe.setdefault(c, float("nan"))
+        eliminated.append({"signal": c, "reason": "manual_exclude",
+                           "detail": f"--exclude {args.exclude}"})
+    for c in excluded_const:
+        sharpe.setdefault(c, float("nan"))
+        eliminated.append({"signal": c, "reason": "zero_variance",
+                           "detail": "constant column in this sample"})
 
     print(f"\nKept ({len(kept)}):")
     for col in kept:
@@ -371,8 +405,8 @@ def main() -> int:
                args.sharpe_threshold, args.corr_threshold)
     write_log(log_path, kept, eliminated, sharpe,
               args.sharpe_threshold, args.corr_threshold)
-    print(f"\nWrote {output_path.relative_to(REPO_ROOT)}")
-    print(f"Wrote {log_path.relative_to(REPO_ROOT)}")
+    print(f"\nWrote {output_path}")
+    print(f"Wrote {log_path}")
     return 0
 
 

@@ -43,6 +43,33 @@ def _make_ohlcv(n: int, seed: int = 42) -> pd.DataFrame:
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Start invariance (GinkgoSpider PR #20): serving recomputes signals on a
+# rolling ~500-bar window, training on years of history. Every signal must be
+# a function of recent bars only — a cumsum-based definition (old OBV
+# pct_change) is not, and flipped 40 % of live signs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_signals_are_start_invariant():
+    n, cut, check = 2000, 600, 500
+    df = _make_ohlcv(n, seed=7)
+    df["timestamp"] = pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC")
+
+    full = add_signals(add_indicators(df)).set_index("timestamp")
+    short = add_signals(add_indicators(df.iloc[cut:].reset_index(drop=True))).set_index("timestamp")
+
+    tail = short.index[-check:]
+    cols = [c for c in full.columns if c.startswith("sig_") and not c.startswith("sig_mtf_")]
+    # sig_mtf_* need ≥160 *daily* bars of history and are excluded from the
+    # 4h serving pool for exactly that reason (see signal_elimination --exclude).
+    bad = {}
+    for c in cols:
+        d = (full.loc[tail, c] - short.loc[tail, c]).abs().max()
+        if not d < 1e-6:                 # recursive EMA/RSI converge, not bit-exact
+            bad[c] = float(d)
+    assert not bad, f"start-dependent signals (max |Δ| over last {check} bars): {bad}"
+
+
 def _make_monotonic_ohlcv(n_up: int = 60, n_down: int = 60) -> pd.DataFrame:
     """
     Construct a clean up-then-down price path. Used for direction-semantics
@@ -172,7 +199,9 @@ def test_tc_a2_all_15_signals_present(signal_df):
         "sig_regime_drawdown", "sig_regime_return_60",
     }
     present = set(signal_columns(signal_df))
-    assert expected == present, f"Signal set mismatch: missing={expected-present}, extra={present-expected}"
+    # The pool has since grown (mtf / hf / mr groups); the 15 core signals must
+    # still all be present.
+    assert expected <= present, f"Signal set mismatch: missing={expected-present}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

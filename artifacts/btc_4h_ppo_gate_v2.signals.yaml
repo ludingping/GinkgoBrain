@@ -1,0 +1,168 @@
+version: 1
+generated_at: '2026-09-05T23:03:25'
+source:
+  tag: config:elim_4h_train_only.yaml (tf=4h)
+  warmup_window: 100
+  periods_per_year: 2190
+thresholds:
+  sharpe_min: -0.2
+  pearson_abs_max: 0.95
+signals:
+- sig_trend_macd_hist
+- sig_trend_slope_21
+- sig_mom_rsi_trend
+- sig_mom_roc_zscore
+- sig_vol_atr_pct
+- sig_vol_bb_width
+- sig_vol_bb_position
+- sig_volume_obv_slope
+- sig_volume_ratio
+- sig_regime_return_60
+eliminated:
+- signal: sig_mom_stoch_state
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.642 < -0.2
+  sharpe: -0.6419
+- signal: sig_hf_range_position
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.571 < -0.2
+  sharpe: -0.5715
+- signal: sig_hf_body_ratio
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.414 < -0.2
+  sharpe: -0.4141
+- signal: sig_mr_rsi_extreme
+  reason: sharpe_below_threshold
+  detail: Sharpe=-0.285 < -0.2
+  sharpe: -0.2854
+- signal: sig_mr_deviation_atr
+  reason: correlation_redundancy
+  detail: '|ρ|=0.997 (+0.997) with sig_trend_price_above_ma (kept: Sharpe=+0.592 vs +0.518)'
+  sharpe: 0.5185
+- signal: sig_trend_price_above_ma
+  reason: correlation_redundancy
+  detail: '|ρ|=0.982 (+0.982) with sig_mom_rsi_trend (kept: Sharpe=+0.649 vs +0.592)'
+  sharpe: 0.5923
+- signal: sig_trend_ema_cross
+  reason: correlation_redundancy
+  detail: '|ρ|=0.978 (+0.978) with sig_trend_slope_21 (kept: Sharpe=+0.850 vs +0.793)'
+  sharpe: 0.7928
+- signal: sig_hf_vol_zscore_24
+  reason: correlation_redundancy
+  detail: '|ρ|=0.961 (+0.961) with sig_volume_ratio (kept: Sharpe=+0.396 vs -0.020)'
+  sharpe: -0.0201
+- signal: sig_mom_rsi_zone
+  reason: correlation_redundancy
+  detail: '|ρ|=0.951 (-0.951) with sig_mom_rsi_trend (kept: Sharpe=+0.649 vs +0.138)'
+  sharpe: 0.1384
+- signal: sig_regime_drawdown
+  reason: manual_exclude
+  detail: --exclude sig_regime_drawdown,sig_mtf_*
+  sharpe: .nan
+- signal: sig_mtf_4h_trend
+  reason: manual_exclude
+  detail: --exclude sig_regime_drawdown,sig_mtf_*
+  sharpe: .nan
+- signal: sig_mtf_1d_regime
+  reason: manual_exclude
+  detail: --exclude sig_regime_drawdown,sig_mtf_*
+  sharpe: .nan
+- signal: sig_funding_current
+  reason: zero_variance
+  detail: constant column in this sample
+  sharpe: .nan
+- signal: sig_funding_trend
+  reason: zero_variance
+  detail: constant column in this sample
+  sharpe: .nan
+- signal: sig_oi_change_zscore
+  reason: zero_variance
+  detail: constant column in this sample
+  sharpe: .nan
+- signal: sig_liq_long_zscore
+  reason: zero_variance
+  detail: constant column in this sample
+  sharpe: .nan
+- signal: sig_liq_short_zscore
+  reason: zero_variance
+  detail: constant column in this sample
+  sharpe: .nan
+- signal: sig_liq_imbalance
+  reason: zero_variance
+  detail: constant column in this sample
+  sharpe: .nan
+artifact:
+  name: btc_4h_ppo_gate_v2
+  exported_at: '2026-09-05T23:48:02'
+  model_zip: btc_4h_ppo_gate_v2.zip
+  model_sha256: 532e5f561204ea565513bd68222ca7f1fb193316efc1f64f48bd4a63afff845b
+  source_run: BTCUSDT_signal_layered_4h_v2b_reg
+  training_config: config/stage2_4h_signal_v2.yaml
+  ginkgobrain_commit: 7b43b0b
+  versions:
+    python: 3.12.3
+    stable_baselines3: 2.8.0
+    sb3_contrib: 2.8.0
+    torch: 2.10.0+cu128
+    gymnasium: 1.2.2
+    numpy: 2.2.6
+    pandas: 2.3.3
+serving:
+  model_class: MaskablePPO
+  load: sb3_contrib.MaskablePPO.load(zip); policy.get_distribution(obs, action_masks=mask)
+  symbol: BTC/USDT
+  timeframe: 4h
+  bar_alignment: UTC-aligned buckets (training tz Asia/Shanghai; 8 mod 4 == 0)
+  window_size: 24
+  n_signals: 10
+  state_dim: 4
+  obs_shape:
+  - 24
+  - 14
+  obs_contract: 'obs shape (window_size, n_signals + 4). Row i = bar t-window_size+1+i. The LAST row is
+    the latest CLOSED bar t: its signals are computed from OHLCV through close[t]; its state features
+    are evaluated at close[t] with the position held BEFORE this bar''s action. The action chosen from
+    this obs fills at close[t]. Signal columns in `signals` order, then the 4 state columns in `serving.state_features`
+    order.'
+  state_features:
+  - name: position_ratio
+    definition: position * close_t / portfolio_value_t, clipped to [0, 1]
+  - name: unrealized_pnl
+    definition: (close_t - entry_price) / entry_price if long else 0, clipped to [-0.5, 0.5]; entry_price
+      is the volume-weighted average of buys since last flat
+  - name: steps_since_stop_norm
+    definition: min(steps_since_stop, window_size) / window_size; constant 1.0 when the ATR stop is disabled
+      (stop_atr_mult <= 0)
+  - name: cum_log_return
+    definition: log(portfolio_value_t / initial_balance) accumulated UNCLIPPED across the episode, clipped
+      to [-1, 1] only when written into the observation
+  action_space:
+    0: 0.0
+    1: 0.25
+    2: 0.5
+    3: 0.75
+    4: 1.0
+  min_hold_steps: 3
+  lock_rule: after an executed switch to a new target level, the action is frozen at that level for min_hold_steps
+    bars (mask = one-hot of the last executed level). Persist last_executed_level and bars_since_change.
+    Apply any serving-side risk gate AFTER the lock so the gate can always flatten.
+  min_rebalance_pct: 0.02
+  commission: 0.001
+  stop_loss: none
+  min_bars: 500
+  episode_note: training episodes are max_episode_steps=540 bars with cum_log_return reset to 0; serving
+    should reset cum_log_return on a comparable cadence or accept drift
+fingerprint:
+  method: ginkgo_golden_v1
+  golden_input: btc_4h_ppo_gate_v2.golden.json
+  expected_output: btc_4h_ppo_gate_v2.golden_signals.json
+  golden_spec:
+    seed: 20260905
+    n_bars: 1200
+    start: '2024-01-01T00:00:00Z'
+    timeframe: 4h
+    generator: scripts/export_paper_artifact.py::make_golden_ohlcv
+  check_rows: 500
+  round_decimals: 9
+  atol: 1.0e-06
+  sha256: 8cf9b921154eb1ef60d3e6168c4a12140aea65a6092088b55824d20181d2ed67

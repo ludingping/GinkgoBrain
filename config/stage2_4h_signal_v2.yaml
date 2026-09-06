@@ -1,0 +1,78 @@
+# Stage 2 — 4h signal-layered PPO, v2 (2026-09-05). Serving target: GinkgoSpider
+# paper account `btc_4h_ppo_gate_v1` → replaces artifact `btc_4h_ppo_gate_v1`.
+#
+# Why v2 (GinkgoSpider PR #20, issues #21–#23):
+#   - sig_volume_obv_slope was start-dependent (OBV pct_change) → 40 % of live
+#     signs disagreed with training. Fixed in utils/signals.py (diff); pool re-selected
+#     on training-period data only (config/signals_v2_4h.yaml).
+#   - v1 policy was near-uniform (argmax p≈0.40) and churned (avg hold 4 bars):
+#     ent_coef 0.05→0.003, exposure tax risk_aversion 0.5→0.05, MaskablePPO +
+#     min_hold_steps lock, explicit switch penalties, obs window now includes the
+#     current bar (Spider already did; v1 was mis-aligned by one bar).
+#   - Train/serve alignment: commission 0.001 (= Spider), ATR stop DISABLED (Spider
+#     implements none; steps_since_stop state feature is then constant 1.0, matching
+#     Spider's hardcoded value), sig_mtf_* excluded (need >500 bars / UTC-vs-Shanghai
+#     daily boundary), sig_regime_drawdown excluded (#22).
+#
+# All env / algo_kwargs keys are explicit: default.yaml deep-merges underneath
+# (e.g. env.trade_penalty_coef: 1.0) and anything omitted is inherited silently.
+#
+# Usage:
+#   uv run python train.py --config config/stage2_4h_signal_v2.yaml --paradigm signal_layered
+#   uv run python scripts/backtest_signal_layered.py --config config/stage2_4h_signal_v2.yaml \
+#       --model models/saved/BTCUSDT_signal_layered_4h_v2/best_model.zip [--test-start "2026-04-13 00:00:00"]
+#   uv run python scripts/export_paper_artifact.py --config config/stage2_4h_signal_v2.yaml \
+#       --run BTCUSDT_signal_layered_4h_v2 --name btc_4h_ppo_gate_v2
+paradigm: signal_layered
+
+# Capacity / regularisation (2026-09-05): the first v2 attempt (net [64,64],
+# n_epochs 10, ent 0.003, lr 1.5e-4, 1M steps = 122 passes over 8.2k training bars)
+# overfit monotonically — train reward −0.44→+0.07/episode while val cum_log_return
+# fell −0.02→−0.31 and best_model was the 10k-step checkpoint. This variant peaks on
+# val at ~100k steps (EvalCallback keeps that checkpoint as best_model); eval still
+# degrades afterwards, so do NOT raise total_timesteps without re-checking the curve.
+training:
+  algo: ppo
+  action_masking: true         # sb3_contrib.MaskablePPO; serving must load with MaskablePPO too
+  policy: MlpPolicy
+  total_timesteps: 300_000
+  n_envs: 8
+  backend: sb3
+  algo_kwargs:
+    learning_rate: 1.0e-4
+    gamma: 0.995
+    n_steps: 1024
+    batch_size: 512
+    n_epochs: 4
+    gae_lambda: 0.95
+    clip_range: 0.2
+    ent_coef: 0.01             # v1: 0.05
+    policy_kwargs:
+      net_arch: [32, 32]       # SB3 default [64, 64] memorises the 8k-bar training set
+
+env:
+  window_size: 24              # 4h × 24 = 4 days (= Spider feature_pipeline.WINDOW_SIZE)
+  initial_balance: 10000.0
+  commission: 0.001            # = Spider paper account
+  risk_aversion_coef: 0.05     # v1: 0.5 (exposure tax ≫ plausible alpha; see const_* baseline rows)
+  excess_return_coef: 0.5
+  action_inertia_coef: 0.002
+  trade_penalty_coef: 0.001
+  min_hold_steps: 3            # 12 h; caps turnover at steps/4. Serving must mirror (lock + mask).
+  max_episode_steps: 540       # 90 days
+  stop_atr_mult: 0             # DISABLED — Spider implements no stop
+  stop_cooldown_steps: 0
+  random_start: true
+
+signals:
+  config_path: config/signals_v2_4h.yaml
+
+crypto:
+  symbol: "BTC/USDT"
+  timeframe: "4h"
+  start_date: "2021-01-01 00:00:00"   # DB coverage starts here (v1's 2020 came from a parquet)
+  val_start: "2024-10-01 00:00:00"
+  test_start: "2026-04-13 00:00:00"   # held out; overlaps the paper-trading period (04-22 → 09-05)
+  end_date: "2026-09-04 00:00:00"
+  timezone: "Asia/Shanghai"           # 4h buckets coincide with UTC (8 mod 4 = 0)
+  db_table: "public.crypto_kline_binance"
