@@ -1,3 +1,26 @@
+# Spider 部署契约 + A/B（2026-09-07，用户批准）
+
+发现：Spider 只有一个账户（模型+gate），**没有 gate_only 账户**；todo 里"gate_only +14.86%"是 Brain 回测数。执行器无条件跑 PPO。
+方案：新增"规则策略"分支，两个纯规则账户 `btc_4h_gate_only`（对照）与 `btc_4h_gate_sma50_v1`（V1），与现有模型账户并行三臂；共用 deadband / 成交 / 快照路径。
+
+- [x] 1. Brain `scripts/export_rule_artifact.py`：规则契约 `*.rules.yaml`（rule 参数 + 回测摘要 + 黄金日线 fingerprint）+ `--verify`；测试
+- [x] 2. Spider schema/模型：`paper_accounts` 加 `strategy_kind`('ppo'|'rule')、`exit_ma_days`，`model_path` 可空（ALTER … IF NOT EXISTS，幂等）
+- [x] 3. Spider `overlay.compute_exit_ok` / `rule_target` / `rule_decisions`；`paper/rules.py` 读契约 + 校验 fingerprint
+- [x] 4. Spider bootstrap：`strategy_kind: rule` 配置从契约填参数并校验；executor 规则分支（跳过 signals/模型）
+- [x] 5. Spider `paper compare`：按账户汇总权益、收益、最大回撤、交易数（A/B 报表）+ Makefile
+- [x] 6. 两个账户配置 + 契约文件入 `paper/artifacts/`；tests（规则函数、fingerprint、执行器 e2e、compare）
+- [x] 7. 文档：GinkgoRoad/docs/GinkgoSpider/4h-BTC虚拟盘-规则策略AB-设计.md；部署步骤
+- [x] 8. 提交两仓库（Spider fb44bfa，Brain 本次）；**生产部署在 daemon 所在机器（192.168.1.68 库，815 条快照）由用户执行**：git pull → make paper-migrate → make paper-seed → make paper-pm2-restart → make paper-compare
+
+## 审查（Spider A/B，2026-09-07）
+- Brain：`scripts/export_rule_artifact.py` → `artifacts/btc_4h_gate_only.rules.yaml`、`btc_4h_gate_sma50_v1.rules.yaml`（含 val/test/确认段回测摘要 + 320 天黄金日线 fingerprint，窗口内三种状态各 23/14/23 行）；tests +4。
+- Spider fb44bfa：`strategy_kind`/`exit_ma_days` 列、`overlay.rule_*`、`rules.py` 契约校验、bootstrap/executor 分支、`paper compare`、两账户配置；tests +9，全量 472 通过。
+- 本地 dev DB 演练通过（真实 K 线：两臂 gate 开、V1 在 SMA50 之上 → 满仓；compare 表正常；模型账户行未动）。
+- 生产库是 192.168.1.68（`btc_4h_ppo_gate_v1` 815 条快照至 09-07），pm2 不在本机 → 部署由用户在服务器执行。**先 git pull 再 seed**：旧执行器遇到 model_path 为空的规则账户会写 MODEL_ERROR。
+- 观察期建议 ≥ 8 周且至少一次 SMA50 触发；判定口径同 §1.1（V1 vs gate_only）。
+
+---
+
 # 趋势底座 + 持仓信号增量 · H1 资金费率（2026-09-06）
 
 设计全文：`GinkgoRoad/docs/GinkgoBrain/BTC4h-趋势底座-持仓信号增量-设计.md`（v0.1，待确认）

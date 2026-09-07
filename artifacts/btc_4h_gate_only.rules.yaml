@@ -1,0 +1,626 @@
+version: 1
+artifact:
+  name: btc_4h_gate_only
+  kind: rule
+  exported_at: '2026-09-07T09:46:38'
+  ginkgobrain_commit: a9de27c
+  design_doc: GinkgoRoad/docs/GinkgoBrain/BTC4h-趋势底座-持仓信号增量-设计.md §5 H3'b
+  generator: scripts/export_rule_artifact.py
+rule:
+  kind: gate_exit_sma
+  symbol: BTC/USDT
+  timeframe: 4h
+  daily_bars: UTC 1d klines; use only the last fully closed day (open_time + 1d <= now)
+  decision_cadence: every closed 4h bar; the daily inputs are those of the last closed UTC day
+  gate:
+    ma_days: 200
+    condition: daily close > SMA(ma_days) (strict)
+  exit:
+    ma_days: null
+    condition: none (pure regime gate)
+  target:
+    'on': 1.0
+    'off': 0.0
+  min_rebalance_pct: 0.02
+  commission: 0.001
+  min_daily_bars: 300
+  no_model: true
+backtest:
+  backtest_rules_h3b_exit_variants.json:val:
+    window: 2024-10-01 00:00:00+08:00 → 2026-04-12 20:00:00+08:00
+    gate_only:
+      total_return: 0.176
+      max_drawdown: -0.3395
+      calmar: 0.329
+      sharpe: 0.3038
+      trades: 19.0
+      trades_per_year: 12.4098
+  backtest_rules_h3b_exit_variants.json:test:
+    window: 2026-04-13 00:00:00+08:00 → 2026-09-03 20:00:00+08:00
+    gate_only:
+      total_return: 0.1721
+      max_drawdown: -0.0455
+      calmar: 10.9151
+      sharpe: 2.9295
+      trades: 0.0
+      trades_per_year: 0.0
+  backtest_rules_h3b_v1_confirm_pre_val.json:pre_val:
+    window: 2021-08-01 00:00:00+08:00 → 2024-09-30 20:00:00+08:00
+    gate_only:
+      total_return: 0.7044
+      max_drawdown: -0.3764
+      calmar: 0.4868
+      sharpe: 0.4542
+      trades: 28.0
+      trades_per_year: 8.8345
+fingerprint:
+  method: ginkgo_rule_golden_v1
+  golden_spec:
+    seed: 20260907
+    n_days: 320
+    start: '2024-01-01'
+    generator: scripts/export_rule_artifact.py::make_golden_daily_closes
+  golden_closes:
+  - 100.2468
+  - 99.698989
+  - 99.014193
+  - 99.630611
+  - 100.033245
+  - 99.972435
+  - 100.12419
+  - 100.000398
+  - 99.746753
+  - 99.956861
+  - 99.615212
+  - 100.193891
+  - 100.022773
+  - 99.686233
+  - 100.056496
+  - 99.891771
+  - 100.574924
+  - 99.851676
+  - 100.14844
+  - 99.85582
+  - 100.121382
+  - 100.327878
+  - 99.313793
+  - 99.36808
+  - 99.688223
+  - 99.544043
+  - 99.524386
+  - 99.240502
+  - 100.297942
+  - 100.47924
+  - 99.513947
+  - 99.251539
+  - 99.768787
+  - 99.869682
+  - 99.675612
+  - 99.894678
+  - 99.601891
+  - 100.314463
+  - 100.581437
+  - 100.902281
+  - 99.731885
+  - 100.234907
+  - 99.912507
+  - 99.009213
+  - 100.41222
+  - 100.421926
+  - 99.833701
+  - 99.871652
+  - 99.339627
+  - 99.255058
+  - 100.037397
+  - 99.974506
+  - 99.835003
+  - 99.922326
+  - 99.599656
+  - 100.180334
+  - 100.112483
+  - 99.850592
+  - 99.567465
+  - 99.190259
+  - 99.382658
+  - 100.823469
+  - 100.426458
+  - 99.966401
+  - 99.715751
+  - 99.765416
+  - 99.945292
+  - 99.677612
+  - 100.21534
+  - 100.273965
+  - 99.654102
+  - 100.280304
+  - 100.121892
+  - 100.384089
+  - 100.211396
+  - 100.095493
+  - 99.571656
+  - 100.273908
+  - 100.196562
+  - 100.290878
+  - 99.964404
+  - 100.318548
+  - 99.817688
+  - 100.388823
+  - 100.11975
+  - 100.072316
+  - 99.580477
+  - 100.226938
+  - 99.682603
+  - 100.338533
+  - 99.480685
+  - 100.457691
+  - 99.282547
+  - 99.960568
+  - 99.618081
+  - 99.273615
+  - 100.084175
+  - 100.553809
+  - 99.944152
+  - 99.946192
+  - 99.353376
+  - 100.353449
+  - 100.490854
+  - 100.546511
+  - 100.833101
+  - 99.803924
+  - 99.497215
+  - 99.778389
+  - 100.244652
+  - 99.715255
+  - 99.789915
+  - 100.325084
+  - 100.651966
+  - 100.689546
+  - 100.403508
+  - 100.081584
+  - 99.787059
+  - 99.836298
+  - 99.097431
+  - 100.517104
+  - 100.098066
+  - 100.128775
+  - 100.198724
+  - 99.878867
+  - 100.077527
+  - 99.940603
+  - 100.649615
+  - 99.840449
+  - 99.655627
+  - 99.775418
+  - 100.154134
+  - 100.20706
+  - 100.423181
+  - 99.516444
+  - 99.591078
+  - 99.783348
+  - 99.785429
+  - 99.834298
+  - 99.888124
+  - 99.832881
+  - 100.260731
+  - 99.948908
+  - 99.385646
+  - 99.84802
+  - 99.988831
+  - 100.474138
+  - 100.352004
+  - 100.163611
+  - 99.73529
+  - 100.227402
+  - 100.056959
+  - 99.760396
+  - 100.245375
+  - 100.115908
+  - 100.072115
+  - 99.468421
+  - 99.814363
+  - 99.840361
+  - 100.111618
+  - 100.538302
+  - 100.301608
+  - 99.868375
+  - 99.635694
+  - 100.200058
+  - 100.194137
+  - 100.246817
+  - 99.728823
+  - 100.34339
+  - 100.486691
+  - 99.878803
+  - 99.569298
+  - 100.233415
+  - 100.825884
+  - 100.020416
+  - 100.202099
+  - 99.744507
+  - 99.847557
+  - 99.854984
+  - 100.163277
+  - 100.264089
+  - 100.143372
+  - 100.188159
+  - 100.264345
+  - 101.067426
+  - 99.789603
+  - 100.754683
+  - 100.020163
+  - 99.447002
+  - 100.359529
+  - 99.967113
+  - 99.343034
+  - 99.710195
+  - 100.151183
+  - 100.042575
+  - 100.136417
+  - 100.201052
+  - 100.424642
+  - 99.821399
+  - 100.185965
+  - 100.087612
+  - 99.184694
+  - 99.436778
+  - 101.050683
+  - 101.559052
+  - 101.886545
+  - 102.911202
+  - 102.859683
+  - 103.680321
+  - 103.648939
+  - 104.163018
+  - 104.517898
+  - 104.724593
+  - 105.947709
+  - 106.749475
+  - 105.724839
+  - 107.044819
+  - 106.942596
+  - 108.570329
+  - 108.950102
+  - 108.72679
+  - 109.130276
+  - 110.928522
+  - 110.42355
+  - 110.954865
+  - 111.621735
+  - 111.668717
+  - 111.939416
+  - 113.063411
+  - 113.35429
+  - 113.954378
+  - 114.584438
+  - 114.860952
+  - 115.102424
+  - 115.753729
+  - 115.077733
+  - 116.374491
+  - 116.950883
+  - 117.544578
+  - 117.781351
+  - 118.50341
+  - 118.138972
+  - 118.75989
+  - 119.994697
+  - 120.644154
+  - 120.090017
+  - 121.315532
+  - 121.736224
+  - 123.637276
+  - 122.398142
+  - 124.444588
+  - 123.787064
+  - 122.995117
+  - 124.882236
+  - 125.153227
+  - 124.972756
+  - 125.630582
+  - 126.141367
+  - 126.501143
+  - 127.475905
+  - 127.478063
+  - 128.378501
+  - 128.577144
+  - 129.681112
+  - 129.331513
+  - 130.729619
+  - 130.991948
+  - 131.861392
+  - 133.678383
+  - 132.612039
+  - 132.559415
+  - 133.757727
+  - 134.161417
+  - 133.820091
+  - 134.197017
+  - 134.848112
+  - 134.450222
+  - 133.458321
+  - 132.618656
+  - 130.874783
+  - 129.442276
+  - 128.760349
+  - 127.609938
+  - 127.062498
+  - 125.444333
+  - 123.238827
+  - 122.836698
+  - 120.677036
+  - 120.503067
+  - 119.280452
+  - 117.737769
+  - 116.207629
+  - 115.90482
+  - 114.021937
+  - 113.226959
+  - 111.73646
+  - 112.13879
+  - 110.102556
+  - 108.840646
+  - 108.392347
+  - 106.526371
+  - 106.304091
+  - 104.064908
+  - 102.750192
+  - 101.306596
+  - 99.738799
+  - 98.666873
+  - 96.942171
+  - 96.247002
+  - 94.325989
+  - 93.620868
+  - 92.130683
+  - 90.912065
+  - 88.969444
+  - 88.47267
+  - 86.660324
+  - 85.503849
+  - 84.01917
+  - 83.451634
+  - 80.863436
+  - 80.079514
+  check_rows: 60
+  expected:
+  - day: '2024-09-17'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-09-18'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-09-19'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-09-20'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-09-21'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-09-22'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-09-23'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-09-24'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-09-25'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-09-26'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-09-27'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-09-28'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-09-29'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-09-30'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-01'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-02'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-03'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-04'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-05'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-06'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-07'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-08'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-09'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-10'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-11'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-12'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-13'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-14'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-15'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-16'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-17'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-18'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-19'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-20'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-21'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-22'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-23'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-10-24'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-10-25'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-10-26'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-10-27'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-10-28'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-10-29'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-10-30'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-10-31'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-01'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-02'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-03'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-04'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-05'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-06'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-07'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-08'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-09'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-10'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-11'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-12'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-13'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-14'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-15'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  sha256: bb19e2179f6359688e1cf023b62ba459f6c5f8dd7aa62fd63c7e560ac166c038
