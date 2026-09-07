@@ -177,3 +177,29 @@ def test_daily_exit_features_semantics() -> None:
     assert DAILY_FEATURES["dd20_atr"](crash, bt_c)[-1] < -2.0
     assert DAILY_FEATURES["dist_sma200"](full, bt)[-1] == pytest.approx(
         d.loc[last_day] / d.rolling(200).mean().loc[last_day] - 1, nan_ok=True)
+
+
+def test_evaluate_acceptance_noharm_mode_and_return_ratio() -> None:
+    gate = enrich({"total_return": 0.17, "max_drawdown": -0.045, "sharpe": 2.9,
+                   "trades": 0, "steps": 864, "mean_reward": 0.0}, 2190)
+    same = dict(gate)
+    # identical to base: fails "improve" (no DD/Calmar improvement) but passes "noharm"
+    assert not evaluate_acceptance(same, gate, mode="improve")["pass"]
+    assert evaluate_acceptance(same, gate, mode="noharm")["pass"]
+    deeper = enrich({"total_return": 0.17, "max_drawdown": -0.05, "sharpe": 2.0,
+                     "trades": 0, "steps": 864, "mean_reward": 0.0}, 2190)
+    assert not evaluate_acceptance(deeper, gate, mode="noharm")["mdd"]
+    low_ret = enrich({"total_return": 0.11, "max_drawdown": -0.02, "sharpe": 2.0,
+                      "trades": 4, "steps": 864, "mean_reward": 0.0}, 2190)
+    assert not evaluate_acceptance(low_ret, gate, mode="improve")["return"]          # 0.11 < 0.8×0.17
+    assert evaluate_acceptance(low_ret, gate, mode="improve", return_ratio=0.6)["pass"]
+    with pytest.raises(ValueError):
+        evaluate_acceptance(same, gate, mode="whatever")
+
+
+def test_daily_features_include_sma20_and_sma100() -> None:
+    from scripts.backtest_signal_layered import DAILY_FEATURES
+    full = _synthetic_4h(n_days=150)
+    bt = full.iloc[-60:].reset_index(drop=True)
+    assert np.isfinite(DAILY_FEATURES["dist_sma20"](full, bt)).all()
+    assert np.isfinite(DAILY_FEATURES["dist_sma100"](full, bt)).all()

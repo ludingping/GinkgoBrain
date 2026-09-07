@@ -203,15 +203,28 @@ def enrich(m: dict, periods_per_year: int) -> dict:
     }
 
 
-def evaluate_acceptance(rule: dict, gate: dict) -> dict:
-    """§1.1 acceptance of a rule relative to gate_only (both enriched dicts)."""
+def evaluate_acceptance(rule: dict, gate: dict, mode: str = "improve",
+                        return_ratio: float = ACCEPT_RETURN_RATIO,
+                        mdd_ratio: float = ACCEPT_MDD_RATIO) -> dict:
+    """§1.1 acceptance of a rule relative to gate_only (both enriched dicts).
+
+    mode="improve": max DD ≤ mdd_ratio × base, return ≥ return_ratio × base, Calmar > base,
+                    trades/yr ≤ cap.   (validation window)
+    mode="noharm":  max DD not deeper than base, return ≥ return_ratio × base, trades/yr ≤ cap.
+                    (hold-out window where the base had nothing to improve — §1.1 revision 2026-09-07)
+    """
+    if mode not in ("improve", "noharm"):
+        raise ValueError(f"unknown acceptance mode '{mode}'")
     checks = {
-        "mdd": abs(rule["max_drawdown"]) <= ACCEPT_MDD_RATIO * abs(gate["max_drawdown"]),
-        "return": rule["total_return"] >= ACCEPT_RETURN_RATIO * gate["total_return"],
-        "calmar": rule["calmar"] > gate["calmar"],
+        "return": rule["total_return"] >= return_ratio * gate["total_return"],
         "turnover": rule["trades_per_year"] <= ACCEPT_MAX_TRADES_PER_YEAR,
     }
-    return {**checks, "pass": all(checks.values())}
+    if mode == "improve":
+        checks["mdd"] = abs(rule["max_drawdown"]) <= mdd_ratio * abs(gate["max_drawdown"])
+        checks["calmar"] = rule["calmar"] > gate["calmar"]
+    else:
+        checks["mdd"] = abs(rule["max_drawdown"]) <= abs(gate["max_drawdown"]) + 1e-12
+    return {**checks, "mode": mode, "pass": all(v for k, v in checks.items() if k != "mode")}
 
 
 # ═══════════════════════════════════════════════════════════════════ run
@@ -256,16 +269,18 @@ def default_periods(c: dict) -> list[tuple[str, str | None, str | None]]:
     return out
 
 
-def format_table(results: dict[str, dict], gate_label: str = "gate_only") -> list[str]:
-    lines = ["| Strategy | Total | Ann. | Max DD | Calmar | Sharpe | Trades | Trades/yr | Accept |",
+def format_table(results: dict[str, dict], gate_label: str = "gate_only",
+                 mode: str = "improve", return_ratio: float = ACCEPT_RETURN_RATIO) -> list[str]:
+    lines = [f"| Strategy | Total | Ann. | Max DD | Calmar | Sharpe | Trades | Trades/yr | Accept ({mode}) |",
              "|---|---:|---:|---:|---:|---:|---:|---:|:--|"]
     gate = results.get(gate_label)
     for name, m in results.items():
         if name in ("buy_and_hold", gate_label) or gate is None:
             acc = "—"
         else:
-            a = evaluate_acceptance(m, gate)
-            acc = "PASS" if a["pass"] else "FAIL(" + ",".join(k for k, v in a.items() if k != "pass" and not v) + ")"
+            a = evaluate_acceptance(m, gate, mode=mode, return_ratio=return_ratio)
+            acc = "PASS" if a["pass"] else "FAIL(" + ",".join(
+                k for k, v in a.items() if k not in ("pass", "mode") and not v) + ")"
         lines.append(f"| {name} | {m['total_return']:+.2%} | {m['ann_return']:+.2%} | "
                      f"{m['max_drawdown']:.2%} | {m['calmar']:.2f} | {m['sharpe']:.2f} | "
                      f"{m['trades']} | {m['trades_per_year']:.1f} | {acc} |")
@@ -281,7 +296,13 @@ def main() -> int:
     ap.add_argument("--tag", default=None, help="report name suffix (default: timestamp)")
     ap.add_argument("--with-contracts", action="store_true",
                     help="force the funding/OI/liq merge even if no rule references them")
+    ap.add_argument("--noharm-periods", default="",
+                    help="comma-separated period names judged with the 'noharm' acceptance "
+                         "(hold-out windows where the base had nothing to improve), e.g. test")
+    ap.add_argument("--accept-return-ratio", type=float, default=ACCEPT_RETURN_RATIO,
+                    help=f"minimum total return as a fraction of gate_only (default {ACCEPT_RETURN_RATIO})")
     args = ap.parse_args()
+    noharm = {p.strip() for p in args.noharm_periods.split(",") if p.strip()}
 
     specs = [parse_rule(r) for r in (args.rule or ["gate_only"])]
     if not any(sp.name == "gate_only" for sp in specs):
@@ -311,8 +332,9 @@ def main() -> int:
              f"- Rules: " + "; ".join(f"`{sp.label}`" for sp in specs),
              f"- Env: commission={env_cfg.get('commission')}, min_hold={env_cfg.get('min_hold_steps')}, "
              f"stop_atr_mult={env_cfg.get('stop_atr_mult')}; Sharpe annualised by {periods_per_year}",
-             f"- Acceptance vs gate_only: MDD ≤ {ACCEPT_MDD_RATIO:.2f}×, return ≥ {ACCEPT_RETURN_RATIO:.0%}×, "
-             f"Calmar >, trades/yr ≤ {ACCEPT_MAX_TRADES_PER_YEAR:.0f}", ""]
+             f"- Acceptance vs gate_only — improve: MDD ≤ {ACCEPT_MDD_RATIO:.2f}×, return ≥ {args.accept_return_ratio:.0%}×, "
+             f"Calmar >, trades/yr ≤ {ACCEPT_MAX_TRADES_PER_YEAR:.0f}; noharm ({', '.join(sorted(noharm)) or '—'}): "
+             f"MDD not deeper, return ≥ {args.accept_return_ratio:.0%}×, trades/yr ≤ {ACCEPT_MAX_TRADES_PER_YEAR:.0f}", ""]
     for name, start, end in periods:
         print(f"\n== period {name}: {start} → {end} ==")
         full_df, bt_df = load_data(cfg, start, end, with_contracts=with_contracts,
@@ -320,9 +342,11 @@ def main() -> int:
         res = run_rules_on_slice(specs, full_df, bt_df, signal_cols, env_cfg, periods_per_year,
                                  timeframe=c.get("timeframe", "4h"))
         label = f"{bt_df['timestamp'].iloc[prefix_rows]} → {bt_df['timestamp'].iloc[-1]}"
-        all_results[name] = {"period": label, "results": res}
-        lines += [f"## {name} — {label}", ""] + format_table(res) + [""]
-        print("\n".join(format_table(res)))
+        mode = "noharm" if name in noharm else "improve"
+        all_results[name] = {"period": label, "mode": mode, "results": res}
+        table = format_table(res, mode=mode, return_ratio=args.accept_return_ratio)
+        lines += [f"## {name} — {label}", ""] + table + [""]
+        print("\n".join(table))
 
     tag = args.tag or datetime.now().strftime("%Y%m%d_%H%M%S")
     out_md = REPO_ROOT / "reports" / f"backtest_rules_{tag}.md"

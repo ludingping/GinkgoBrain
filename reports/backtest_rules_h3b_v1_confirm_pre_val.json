@@ -1,0 +1,64 @@
+{
+  "config": "config/stage2_4h_signal_v2.yaml",
+  "rules": [
+    "gate_only",
+    "gate_reduce:signal=dist_sma50,thr=0,level=0,side=below",
+    "gate_reduce:signal=dist_sma50,thr=0,level=2,side=below"
+  ],
+  "periods": {
+    "pre_val": {
+      "period": "2021-08-01 00:00:00+08:00 \u2192 2024-09-30 20:00:00+08:00",
+      "mode": "improve",
+      "results": {
+        "buy_and_hold": {
+          "total_return": 0.5373430516881936,
+          "max_drawdown": -0.7704339319608701,
+          "sharpe": 0.2493911867346988,
+          "trades": 1,
+          "steps": 6941,
+          "mean_reward": NaN,
+          "years": 3.169406392694064,
+          "ann_return": 0.14532638319075342,
+          "calmar": 0.18862926094243532,
+          "trades_per_year": 0.3155164961821063
+        },
+        "gate_only": {
+          "total_return": 0.7044031636030574,
+          "max_drawdown": -0.3763544994842919,
+          "sharpe": 0.45419708575082307,
+          "trades": 28,
+          "steps": 6941,
+          "mean_reward": -2.4835362294941848e-05,
+          "years": 3.169406392694064,
+          "ann_return": 0.18321833466919624,
+          "calmar": 0.4868238188204345,
+          "trades_per_year": 8.834461893098977
+        },
+        "gate_reduce:signal=dist_sma50,thr=0,level=0,side=below": {
+          "total_return": 1.108901369922707,
+          "max_drawdown": -0.2558133867628475,
+          "sharpe": 0.7594109668518363,
+          "trades": 40,
+          "steps": 6941,
+          "mean_reward": 4.1377399101229746e-05,
+          "years": 3.169406392694064,
+          "ann_return": 0.2654503158290311,
+          "calmar": 1.037671715261397,
+          "trades_per_year": 12.620659847284253
+        },
+        "gate_reduce:signal=dist_sma50,thr=0,level=2,side=below": {
+          "total_return": 0.9288319751500542,
+          "max_drawdown": -0.27403298972124135,
+          "sharpe": 0.6356370115584169,
+          "trades": 51,
+          "steps": 6941,
+          "mean_reward": 9.616008718809273e-06,
+          "years": 3.169406392694064,
+          "ann_return": 0.23031151423648466,
+          "calmar": 0.8404517808996934,
+          "trades_per_year": 16.091341305287422
+        }
+      }
+    }
+  }
+}

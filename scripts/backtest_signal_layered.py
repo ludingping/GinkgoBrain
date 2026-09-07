@@ -149,7 +149,9 @@ def daily_low_distance(full_df: pd.DataFrame, bt_df: pd.DataFrame,
 # Daily-derived, gate-aligned features usable by rules and the IC probe: name → fn(full_df, bt_df)
 DAILY_FEATURES = {
     "dist_sma200": lambda full, bt: daily_sma_distance(full, bt, 200),
+    "dist_sma20": lambda full, bt: daily_sma_distance(full, bt, 20),
     "dist_sma50": lambda full, bt: daily_sma_distance(full, bt, 50),
+    "dist_sma100": lambda full, bt: daily_sma_distance(full, bt, 100),
     "dd20_atr": lambda full, bt: daily_drawdown_atr(full, bt, 20, 14),
     "dist_low20": lambda full, bt: daily_low_distance(full, bt, 20),
 }
