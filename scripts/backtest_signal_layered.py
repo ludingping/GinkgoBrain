@@ -146,6 +146,15 @@ def daily_low_distance(full_df: pd.DataFrame, bt_df: pd.DataFrame,
     return _align_last_closed_day(d["close"] / prior_low - 1.0, bt_df)
 
 
+def daily_realized_vol(full_df: pd.DataFrame, bt_df: pd.DataFrame,
+                       window_days: int = 20) -> np.ndarray:
+    """Annualised std of the last `window_days` UTC daily log returns (×√365),
+    of the last closed day. H6 volatility-targeting input."""
+    d = _daily_ohlc(full_df)["close"]
+    lr = np.log(d).diff()
+    return _align_last_closed_day(lr.rolling(window_days).std() * np.sqrt(365.0), bt_df)
+
+
 # Daily-derived, gate-aligned features usable by rules and the IC probe: name → fn(full_df, bt_df)
 DAILY_FEATURES = {
     "dist_sma200": lambda full, bt: daily_sma_distance(full, bt, 200),

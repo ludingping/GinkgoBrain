@@ -1,3 +1,47 @@
+# H6 波动率目标仓位（2026-09-14，预登记后同日跑完）
+
+- [x] 设计文档登记 H6（机制、网格、四条通过标准）——先于看数据
+- [x] `backtest_rules.py`：`rvol<N>` 日线特征、`gate_vol` 规则（档位量化、floor、hysteresis）；tests +3
+- [x] BTC 9 组 × h∈{0,0.25}、ETH 9 组、SOL/BNB 主变体；`reports/h6_vol_targeting.md`
+- [x] 判定：主变体 FAIL，邻域方向一致 PASS，ETH 收益 FAIL → 规则层降回撤线关闭
+- [ ] 用户决定：σ*=30%/N=30 是否作为 A/B 第三臂进 Spider；下一步走组合层还是 H4b
+
+## 审查
+- 这是第一个四资产、全区间方向一致的候选（MDD 比 0.54–0.91），但幅度不到 2/3，收益代价在 ETH val / SOL pre_val 接近归零。
+- 波动率目标在平静上涨期系统性少赚，是机制代价；test 段 no-harm 的收益下限对仓位类规则会经常触发。
+
+---
+
+# V1 参数平台与跨资产检验（2026-09-14）
+
+- [x] `backtest_rules.py` 增加 `dist_sma<N>` 任意日线、`--gate-sma-days`、`--symbol`；tests +2
+- [x] BTC 退出 30–100 × gate 150/200/250；ETH/SOL/BNB 退出 30/50/100；pre_val / val / test 三段
+- [x] `reports/v1_parameter_plateau.md` + GinkgoRoad 设计文档附录 H3'c
+- [ ] 用户确认 §1.1 修订（参数邻域 + 兄弟资产）；决定 V1 是否继续 A/B、是否开波动率目标仓位假设
+
+## 审查
+- gate 长度是平台；退出长度在 pre_val 只有 40/50 有效，跨资产不成立。V1 降级为 BTC 专属候选，底座仍是 gate_only。
+- 结论依赖两段 BTC 回撤形态（2021-11 急跌、2024-03 震荡），样本本质上是 2 次事件。
+
+---
+
+# 合约持仓/杠杆数据 — 信号视觉探索 notebook（2026-09-09）
+
+目的：Spider 2026-09-08 新入库的多空比 ×4 / 爆仓 5min 聚合，先画图再由用户提假设；不出 PASS/FAIL。
+
+- [x] 1. 摸清数据：`crypto_position_ratio_binance`（4 类，2020-09 起）、`crypto_liquidation_5min`（2026-04-10 起）、OI/funding/F&G 覆盖范围（直接查库）
+- [x] 2. `notebooks/crypto_contract_signal_explorer.ipynb`：§0 读取+逐月覆盖热力图 → §1 底座 gate_only/V1 回撤 episode → §2 日线全景 → §3 90d z-score → §4 episode 4h 放大 → §5 前两折条件统计（IC 表 / 十分位 / regime / 相关 / 事件路径）→ §6 观察记录模板
+- [x] 3. nbclient 无头执行通过（17s，0 stderr），带输出保存 6.5 MB（与 crypto_kline_analysis 惯例一致）
+- [x] 4a. `utils/data_loader.read_position_ratio(symbol, since, until, ratio_types)`：长→宽，origin vision>rest 去重，缺口留 NaN；`merge_contract_data(df_ratio=)`、`CONTRACT_SOURCE_COLS['ratio']`（neutral_fill 不填零）；tests +7，全量 365 通过（2026-09-14）
+- [ ] 4b. 用户看图 → 在 §6 登记假设（方向先写死）→ `load_df_from_config` 接 ratio + 探针特征进 `PROBE_FEATURES` → `signal_ic_probe.py` 三折跑 H4a/H4b/H5
+
+## 审查
+- 数据事实：`top_account`/`top_position` 2022-02→04 缺失，`top_position` 2022-07→11 缺失，`taker_vol` 2022-02→04 缺失（Vision 归档洞）；四比率都干净的窗口从 2023-01 起。notebook 不填零，热力图直接露出缺口。
+- fold 边界与 `signal_ic_probe.py` 一致：f1 2022-06-04→2023-11-05，f2 →2025-04-07，f3 →今（留出，§5 默认不用）。
+- §5 只是形状参考：`retail_minus_top_z` 与 `top_account_z` 在 f1/f2 的 1d/3d 同号（负）；`top_position_z`、`oi_z`、`taker_dev`、funding 两折反号；`top_position_z` 分布随 regime 大幅平移（更像趋势代理）。这些不是结论。
+
+---
+
 # Spider 部署契约 + A/B（2026-09-07，用户批准）
 
 发现：Spider 只有一个账户（模型+gate），**没有 gate_only 账户**；todo 里"gate_only +14.86%"是 Brain 回测数。执行器无条件跑 PPO。

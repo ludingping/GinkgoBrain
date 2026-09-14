@@ -1,0 +1,209 @@
+{
+  "config": "config/stage2_4h_signal_v2.yaml",
+  "rules": [
+    "gate_only",
+    "gate_reduce:signal=dist_sma30,thr=0,level=0,side=below",
+    "gate_reduce:signal=dist_sma50,thr=0,level=0,side=below",
+    "gate_reduce:signal=dist_sma100,thr=0,level=0,side=below"
+  ],
+  "periods": {
+    "pre_val": {
+      "period": "2021-08-01 00:00:00+08:00 \u2192 2024-09-30 20:00:00+08:00",
+      "mode": "improve",
+      "results": {
+        "buy_and_hold": {
+          "total_return": 3.4795183246073274,
+          "max_drawdown": -0.9659882371149977,
+          "sharpe": 0.43596274678899644,
+          "trades": 1,
+          "steps": 6941,
+          "mean_reward": NaN,
+          "years": 3.169406392694064,
+          "ann_return": 0.6049969945820464,
+          "calmar": 0.6262985110345847,
+          "trades_per_year": 0.3155164961821063
+        },
+        "gate_only": {
+          "total_return": 9.715456572047648,
+          "max_drawdown": -0.6625487101068432,
+          "sharpe": 1.0035840379079344,
+          "trades": 30,
+          "steps": 6941,
+          "mean_reward": 0.0001973242176716189,
+          "years": 3.169406392694064,
+          "ann_return": 1.113417800245729,
+          "calmar": 1.6805070831187312,
+          "trades_per_year": 9.46549488546319
+        },
+        "gate_reduce:signal=dist_sma30,thr=0,level=0,side=below": {
+          "total_return": 7.7667339155911215,
+          "max_drawdown": -0.6494643961949922,
+          "sharpe": 1.0872636364330923,
+          "trades": 72,
+          "steps": 6941,
+          "mean_reward": 0.00019196677881945715,
+          "years": 3.169406392694064,
+          "ann_return": 0.9837223530396406,
+          "calmar": 1.5146670992327844,
+          "trades_per_year": 22.717187725111657
+        },
+        "gate_reduce:signal=dist_sma50,thr=0,level=0,side=below": {
+          "total_return": 15.459976727047493,
+          "max_drawdown": -0.5176997549148483,
+          "sharpe": 1.3149095700545064,
+          "trades": 30,
+          "steps": 6941,
+          "mean_reward": 0.00033668129123110734,
+          "years": 3.169406392694064,
+          "ann_return": 1.4199337933946334,
+          "calmar": 2.742774706602257,
+          "trades_per_year": 9.46549488546319
+        },
+        "gate_reduce:signal=dist_sma100,thr=0,level=0,side=below": {
+          "total_return": 8.14503078233408,
+          "max_drawdown": -0.6446324325277983,
+          "sharpe": 1.007627432545453,
+          "trades": 48,
+          "steps": 6941,
+          "mean_reward": 0.00018601540126853718,
+          "years": 3.169406392694064,
+          "ann_return": 1.0103412201415471,
+          "calmar": 1.567313664594402,
+          "trades_per_year": 15.144791816741105
+        }
+      }
+    },
+    "val": {
+      "period": "2024-10-01 00:00:00+08:00 \u2192 2026-04-12 20:00:00+08:00",
+      "mode": "improve",
+      "results": {
+        "buy_and_hold": {
+          "total_return": -0.4743427705404355,
+          "max_drawdown": -0.7320081050866407,
+          "sharpe": -0.5224427888454637,
+          "trades": 1,
+          "steps": 3353,
+          "mean_reward": NaN,
+          "years": 1.5310502283105023,
+          "ann_return": -0.34298100459138336,
+          "calmar": -0.4685480969514511,
+          "trades_per_year": 0.6531464360274382
+        },
+        "gate_only": {
+          "total_return": -0.007300097880448608,
+          "max_drawdown": -0.45320895935226735,
+          "sharpe": -0.009094198636534852,
+          "trades": 11,
+          "steps": 3353,
+          "mean_reward": -5.423682262097834e-05,
+          "years": 1.5310502283105023,
+          "ann_return": -0.004774089266869175,
+          "calmar": -0.01053396930566503,
+          "trades_per_year": 7.184610796301819
+        },
+        "gate_reduce:signal=dist_sma30,thr=0,level=0,side=below": {
+          "total_return": 0.13199090524469037,
+          "max_drawdown": -0.384579174134148,
+          "sharpe": 0.2026049089863445,
+          "trades": 25,
+          "steps": 3353,
+          "mean_reward": 4.146759592518612e-05,
+          "years": 1.5310502283105023,
+          "ann_return": 0.08434460442365488,
+          "calmar": 0.21931661955837992,
+          "trades_per_year": 16.328660900685954
+        },
+        "gate_reduce:signal=dist_sma50,thr=0,level=0,side=below": {
+          "total_return": -0.005487370268846603,
+          "max_drawdown": -0.40517199359805367,
+          "sharpe": -0.008281473753246296,
+          "trades": 21,
+          "steps": 3353,
+          "mean_reward": -2.439878693885958e-05,
+          "years": 1.5310502283105023,
+          "ann_return": -0.0035874755562901317,
+          "calmar": -0.008854204172485442,
+          "trades_per_year": 13.716075156576201
+        },
+        "gate_reduce:signal=dist_sma100,thr=0,level=0,side=below": {
+          "total_return": 0.0016965946187388337,
+          "max_drawdown": -0.4600164271910765,
+          "sharpe": 0.002338271798201971,
+          "trades": 25,
+          "steps": 3353,
+          "mean_reward": -4.0958762555025916e-05,
+          "years": 1.5310502283105023,
+          "ann_return": 0.0011077989276946365,
+          "calmar": 0.002408172539530836,
+          "trades_per_year": 16.328660900685954
+        }
+      }
+    },
+    "test": {
+      "period": "2026-04-13 00:00:00+08:00 \u2192 2026-09-03 20:00:00+08:00",
+      "mode": "noharm",
+      "results": {
+        "buy_and_hold": {
+          "total_return": 0.28143468715696973,
+          "max_drawdown": -0.37223749872695777,
+          "sharpe": 1.1575915186101513,
+          "trades": 1,
+          "steps": 863,
+          "mean_reward": NaN,
+          "years": 0.39406392694063924,
+          "ann_return": 0.8762770490246705,
+          "calmar": 2.3540805319762637,
+          "trades_per_year": 2.5376593279258404
+        },
+        "gate_only": {
+          "total_return": 0.2305555165144073,
+          "max_drawdown": -0.10318983639521051,
+          "sharpe": 2.414717116366357,
+          "trades": 0,
+          "steps": 863,
+          "mean_reward": 0.00019109171546262573,
+          "years": 0.39406392694063924,
+          "ann_return": 0.6929579855243255,
+          "calmar": 6.715370522251247,
+          "trades_per_year": 0.0
+        },
+        "gate_reduce:signal=dist_sma30,thr=0,level=0,side=below": {
+          "total_return": 0.2305555165144073,
+          "max_drawdown": -0.10318983639521051,
+          "sharpe": 2.414717116366357,
+          "trades": 0,
+          "steps": 863,
+          "mean_reward": 0.00019109171546262573,
+          "years": 0.39406392694063924,
+          "ann_return": 0.6929579855243255,
+          "calmar": 6.715370522251247,
+          "trades_per_year": 0.0
+        },
+        "gate_reduce:signal=dist_sma50,thr=0,level=0,side=below": {
+          "total_return": 0.2305555165144073,
+          "max_drawdown": -0.10318983639521051,
+          "sharpe": 2.414717116366357,
+          "trades": 0,
+          "steps": 863,
+          "mean_reward": 0.00019109171546262573,
+          "years": 0.39406392694063924,
+          "ann_return": 0.6929579855243255,
+          "calmar": 6.715370522251247,
+          "trades_per_year": 0.0
+        },
+        "gate_reduce:signal=dist_sma100,thr=0,level=0,side=below": {
+          "total_return": 0.2305555165144073,
+          "max_drawdown": -0.10318983639521051,
+          "sharpe": 2.414717116366357,
+          "trades": 0,
+          "steps": 863,
+          "mean_reward": 0.00019109171546262573,
+          "years": 0.39406392694063924,
+          "ann_return": 0.6929579855243255,
+          "calmar": 6.715370522251247,
+          "trades_per_year": 0.0
+        }
+      }
+    }
+  }
+}

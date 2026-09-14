@@ -21,6 +21,9 @@ Rule grammar:  name[:k=v,k=v,...]
                                     (0-4 = 0/25/50/75/100 %), gate on otherwise → 100 %, gate off → 0 %
                                     signals may be pool columns, raw contract columns, probe features
                                     (funding_cum_3d_z, …) or daily features (dist_sma200, dist_sma50, dd20_atr, dist_low20)
+    gate_vol:target=,window=[,hyst=,floor=]
+                                    H6 volatility targeting: gate on → level round(4·min(1, target/rvol<window>))
+                                    (annualised daily vol), never below `floor` (default 1); gate off → 0 %
     const:level=                    fixed target (sanity)
 Outputs reports/backtest_rules_<tag>.md + .json (one table per period).
 """
@@ -28,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -44,7 +48,8 @@ from envs.signal_layered_env import (                                  # noqa: E
     SignalLayeredEnv, TARGET_POSITION, load_signal_list,
 )
 from scripts.backtest_signal_layered import (                          # noqa: E402
-    _ALLOWED_ENV_KEYS, DAILY_FEATURES, buy_and_hold_metrics, daily_sma_gate,
+    _ALLOWED_ENV_KEYS, DAILY_FEATURES, buy_and_hold_metrics, daily_realized_vol,
+    daily_sma_distance, daily_sma_gate,
     load_data, run_backtest, summarise,
 )
 from scripts.signal_ic_probe import (                                  # noqa: E402
@@ -83,10 +88,12 @@ class RuleSpec:
 
     @property
     def signals(self) -> list[str]:
+        if self.name == "gate_vol":
+            return [f"rvol{int(self.params['window'])}"]
         return [self.params[k] for k in ("signal", "signal2") if k in self.params]
 
 
-_RULE_NAMES = {"gate_only", "gate_reduce", "const"}
+_RULE_NAMES = {"gate_only", "gate_reduce", "gate_vol", "const"}
 
 
 def _coerce(v: str):
@@ -122,6 +129,18 @@ def parse_rule(text: str) -> RuleSpec:
             params.setdefault("side2", "above")
             if params["side2"] not in ("above", "below"):
                 raise ValueError("gate_reduce side2 must be 'above' or 'below'")
+    if name == "gate_vol":
+        missing = {"target", "window"} - params.keys()
+        if missing:
+            raise ValueError(f"gate_vol needs {sorted(missing)}")
+        params.setdefault("hyst", 0.0)
+        params.setdefault("floor", 1)
+        if not (0 < float(params["target"]) < 5):
+            raise ValueError("gate_vol target is an annualised vol fraction, e.g. 0.4")
+        if not (isinstance(params["window"], int) and params["window"] >= 2):
+            raise ValueError("gate_vol window must be an int ≥ 2 (days)")
+        if not (isinstance(params["floor"], int) and 0 <= params["floor"] <= 4):
+            raise ValueError("gate_vol floor must be an int in 0..4")
     if name == "const" and "level" not in params:
         raise ValueError("const needs level=")
     if "level" in params and not (isinstance(params["level"], int) and 0 <= params["level"] <= 4):
@@ -137,6 +156,9 @@ def make_act_fn(spec: RuleSpec, bt_df: pd.DataFrame, gate: np.ndarray):
 
     if spec.name == "gate_only":
         return lambda obs, env: ((FULL if gate[env.current_step] else FLAT), None)
+
+    if spec.name == "gate_vol":
+        return _make_gate_vol_act(spec, bt_df, gate)
 
     # gate_reduce (optionally AND-ed with a second condition)
     def _cond(sig_key: str, thr_key: str, side_key: str):
@@ -163,6 +185,39 @@ def make_act_fn(spec: RuleSpec, bt_df: pd.DataFrame, gate: np.ndarray):
     return act
 
 
+def vol_target_level(raw: float, current: int, *, hyst: float, floor: int) -> int:
+    """Quantise 4·min(1, σ*/σ) to a 0..4 level with optional hysteresis around `current`.
+    NaN/non-positive vol (warmup) → FULL."""
+    if not np.isfinite(raw):
+        return FULL
+    if hyst > 0 and abs(raw - current) <= 0.5 + hyst:
+        return current
+    lvl = int(np.floor(raw + 0.5))
+    return max(floor, min(FULL, lvl))
+
+
+def _make_gate_vol_act(spec: RuleSpec, bt_df: pd.DataFrame, gate: np.ndarray):
+    col = spec.signals[0]
+    if col not in bt_df.columns:
+        raise ValueError(f"rule feature '{col}' not in data columns")
+    vol = bt_df[col].to_numpy(dtype=float)
+    target = float(spec.params["target"])
+    hyst, floor = float(spec.params["hyst"]), int(spec.params["floor"])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        raw = np.where(vol > 0, FULL * np.minimum(1.0, target / vol), np.nan)
+    state = {"lvl": FULL}
+
+    def act(obs, env):
+        i = env.current_step
+        if not gate[i]:
+            state["lvl"] = FULL          # re-entry starts from the un-hysteresised level
+            return FLAT, None
+        state["lvl"] = vol_target_level(float(raw[i]), state["lvl"], hyst=hyst, floor=floor)
+        return state["lvl"], None
+
+    return act
+
+
 def rule_contract_sources(specs: list[RuleSpec]) -> set[str]:
     """Contract data sources referenced by the rules (signal names or raw columns)."""
     raw_to_src = {c: src for src, cols in CONTRACT_SOURCE_COLS.items() for c in cols}
@@ -175,13 +230,34 @@ def rule_contract_sources(specs: list[RuleSpec]) -> set[str]:
     return out
 
 
+_DIST_SMA_RE = re.compile(r"^dist_sma(\d+)$")
+_RVOL_RE = re.compile(r"^rvol(\d+)$")
+
+
+def resolve_daily_feature(name: str):
+    """DAILY_FEATURES entry, or a parametric `dist_sma<N>` (N days) for the plateau sweep."""
+    if name in DAILY_FEATURES:
+        return DAILY_FEATURES[name]
+    m = _DIST_SMA_RE.match(name)
+    if m:
+        days = int(m.group(1))
+        return lambda full, bt: daily_sma_distance(full, bt, days)
+    m = _RVOL_RE.match(name)
+    if m:
+        days = int(m.group(1))
+        return lambda full, bt: daily_realized_vol(full, bt, days)
+    return None
+
+
 def add_rule_features(full_df: pd.DataFrame, bt_df: pd.DataFrame, specs: list[RuleSpec],
                       timeframe: str) -> pd.DataFrame:
     """Materialise probe features / dist_sma200 referenced by the rules onto bt_df."""
     names = [c for sp in specs for c in sp.signals if c in PROBE_FEATURES]
     out = add_probe_features(bt_df, names, timeframe)
-    for name in {c for sp in specs for c in sp.signals if c in DAILY_FEATURES}:
-        out[name] = DAILY_FEATURES[name](full_df, bt_df)   # full history → SMA/ATR warmed
+    for name in {c for sp in specs for c in sp.signals}:
+        fn = resolve_daily_feature(name)
+        if fn is not None:
+            out[name] = fn(full_df, bt_df)   # full history → SMA/ATR warmed
     return out
 
 
@@ -237,9 +313,10 @@ def run_rules_on_slice(
     env_cfg: dict,
     periods_per_year: int,
     timeframe: str = "4h",
+    gate_sma_days: int = 200,
 ) -> dict[str, dict]:
     """Roll every rule (plus buy_and_hold) through the env on one slice."""
-    gate = daily_sma_gate(full_df, bt_df)
+    gate = daily_sma_gate(full_df, bt_df, sma_days=gate_sma_days)
     bt_df = add_rule_features(full_df, bt_df, specs, timeframe)
     out: dict[str, dict] = {
         "buy_and_hold": enrich(buy_and_hold_metrics(bt_df, signal_cols, env_cfg, periods_per_year),
@@ -299,6 +376,10 @@ def main() -> int:
     ap.add_argument("--noharm-periods", default="",
                     help="comma-separated period names judged with the 'noharm' acceptance "
                          "(hold-out windows where the base had nothing to improve), e.g. test")
+    ap.add_argument("--symbol", default=None,
+                    help="override crypto.symbol in the config (cross-asset check), e.g. ETH/USDT")
+    ap.add_argument("--gate-sma-days", type=int, default=200,
+                    help="daily SMA length of the regime gate (default 200; plateau sweep)")
     ap.add_argument("--accept-return-ratio", type=float, default=ACCEPT_RETURN_RATIO,
                     help=f"minimum total return as a fraction of gate_only (default {ACCEPT_RETURN_RATIO})")
     args = ap.parse_args()
@@ -311,6 +392,8 @@ def main() -> int:
     with open(args.config, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     c = cfg["crypto"]
+    if args.symbol:
+        c["symbol"] = args.symbol
     signal_cols = load_signal_list(cfg["signals"]["config_path"])
     env_cfg = {k: v for k, v in cfg["env"].items() if k in _ALLOWED_ENV_KEYS}
     env_cfg["random_start"] = False
@@ -329,6 +412,7 @@ def main() -> int:
     all_results: dict[str, dict] = {}
     lines = [f"# Rule backtest — {args.config.name}", "",
              f"- Generated: `{datetime.now().isoformat(timespec='seconds')}`",
+             f"- Symbol: `{c['symbol']}`; gate = UTC daily close > SMA{args.gate_sma_days}",
              f"- Rules: " + "; ".join(f"`{sp.label}`" for sp in specs),
              f"- Env: commission={env_cfg.get('commission')}, min_hold={env_cfg.get('min_hold_steps')}, "
              f"stop_atr_mult={env_cfg.get('stop_atr_mult')}; Sharpe annualised by {periods_per_year}",
@@ -340,7 +424,8 @@ def main() -> int:
         full_df, bt_df = load_data(cfg, start, end, with_contracts=with_contracts,
                                    prefix_rows=prefix_rows, required_contracts=required)
         res = run_rules_on_slice(specs, full_df, bt_df, signal_cols, env_cfg, periods_per_year,
-                                 timeframe=c.get("timeframe", "4h"))
+                                 timeframe=c.get("timeframe", "4h"),
+                                 gate_sma_days=args.gate_sma_days)
         label = f"{bt_df['timestamp'].iloc[prefix_rows]} → {bt_df['timestamp'].iloc[-1]}"
         mode = "noharm" if name in noharm else "improve"
         all_results[name] = {"period": label, "mode": mode, "results": res}

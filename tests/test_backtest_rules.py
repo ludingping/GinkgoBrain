@@ -203,3 +203,84 @@ def test_daily_features_include_sma20_and_sma100() -> None:
     bt = full.iloc[-60:].reset_index(drop=True)
     assert np.isfinite(DAILY_FEATURES["dist_sma20"](full, bt)).all()
     assert np.isfinite(DAILY_FEATURES["dist_sma100"](full, bt)).all()
+
+
+# --- parametric daily exit features (V1 parameter-plateau sweep, 2026-09-14) ---
+
+def test_resolve_daily_feature_known_and_parametric() -> None:
+    from scripts.backtest_rules import resolve_daily_feature
+    from scripts.backtest_signal_layered import DAILY_FEATURES
+    assert resolve_daily_feature("dist_sma50") is DAILY_FEATURES["dist_sma50"]
+    assert resolve_daily_feature("dd20_atr") is DAILY_FEATURES["dd20_atr"]
+    assert resolve_daily_feature("dist_sma60") is not None      # not in the table, built on the fly
+    assert resolve_daily_feature("dist_sma") is None
+    assert resolve_daily_feature("sig_funding_current") is None
+
+
+def test_parametric_dist_sma_matches_table_entry() -> None:
+    import numpy as np
+    import pandas as pd
+    from scripts.backtest_rules import resolve_daily_feature
+    ts = pd.date_range("2024-01-01", periods=120 * 6, freq="4h", tz="Asia/Shanghai")
+    full = pd.DataFrame({"timestamp": ts, "close": np.linspace(100, 200, len(ts)),
+                         "high": 0.0, "low": 0.0, "open": 0.0, "volume": 1.0})
+    bt = full.iloc[-60:].reset_index(drop=True)
+    a = resolve_daily_feature("dist_sma50")(full, bt)
+    b = resolve_daily_feature("dist_sma050")(full, bt)   # same N via the regex path
+    np.testing.assert_allclose(np.asarray(a, dtype=float), np.asarray(b, dtype=float), equal_nan=True)
+
+
+# --- H6 volatility targeting (2026-09-14) ---
+
+def test_parse_gate_vol_defaults_and_validation() -> None:
+    from scripts.backtest_rules import parse_rule
+    sp = parse_rule("gate_vol:target=0.4,window=20")
+    assert sp.params == {"target": 0.4, "window": 20, "hyst": 0.0, "floor": 1}
+    assert sp.signals == ["rvol20"]
+    import pytest
+    with pytest.raises(ValueError, match="gate_vol needs"):
+        parse_rule("gate_vol:target=0.4")
+    with pytest.raises(ValueError, match="floor"):
+        parse_rule("gate_vol:target=0.4,window=20,floor=7")
+
+
+def test_vol_target_level_quantisation_floor_and_hysteresis() -> None:
+    import numpy as np
+    from scripts.backtest_rules import vol_target_level
+    # 4·min(1, 0.4/σ): σ=0.4 → 4, σ=0.8 → 2, σ=1.6 → 1 (rounded), σ=4 → 0.4 → floor 1
+    assert vol_target_level(4.0, 4, hyst=0, floor=1) == 4
+    assert vol_target_level(2.0, 4, hyst=0, floor=1) == 2
+    assert vol_target_level(0.4, 4, hyst=0, floor=1) == 1
+    assert vol_target_level(0.4, 4, hyst=0, floor=0) == 0
+    assert vol_target_level(np.nan, 2, hyst=0, floor=1) == 4          # warmup → full
+    # hysteresis: raw 2.6 vs current 2 → |0.6| ≤ 0.75 keeps 2; without hyst rounds to 3
+    assert vol_target_level(2.6, 2, hyst=0.25, floor=1) == 2
+    assert vol_target_level(2.6, 2, hyst=0.0, floor=1) == 3
+
+
+def test_rvol_feature_and_gate_vol_act() -> None:
+    import numpy as np
+    import pandas as pd
+    from scripts.backtest_rules import RuleSpec, make_act_fn, parse_rule, resolve_daily_feature
+    rng = np.random.default_rng(0)
+    ts = pd.date_range("2024-01-01", periods=60 * 6, freq="4h", tz="UTC")
+    close = 100 * np.exp(np.cumsum(rng.normal(0, 0.03 / np.sqrt(6), len(ts))))   # ~3%/day
+    full = pd.DataFrame({"timestamp": ts, "open": close, "high": close, "low": close,
+                         "close": close, "volume": 1.0})
+    bt = full.iloc[-6 * 20:].reset_index(drop=True)
+    rv = resolve_daily_feature("rvol20")(full, bt)
+    assert np.isfinite(rv[-1]) and 0.2 < rv[-1] < 1.5                # ≈ 3%·√365 ≈ 0.57
+    bt = bt.assign(rvol20=rv)
+    spec = parse_rule("gate_vol:target=0.4,window=20")
+    gate = np.ones(len(bt), dtype=bool); gate[:3] = False
+    act = make_act_fn(spec, bt, gate)
+
+    class Env:  # minimal stand-in for SignalLayeredEnv
+        current_step = 0
+    env = Env()
+    env.current_step = 0
+    assert act(None, env)[0] == 0                                     # gate off → flat
+    env.current_step = len(bt) - 1
+    lvl = act(None, env)[0]
+    expected = max(1, min(4, int(np.floor(4 * min(1.0, 0.4 / rv[-1]) + 0.5))))
+    assert lvl == expected
