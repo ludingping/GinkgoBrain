@@ -15,7 +15,10 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from utils import db
-from utils.data_loader import merge_contract_data
+from utils.data_loader import (
+    RATIO_TYPES, ContractCoverageError, check_contract_coverage, contract_coverage,
+    merge_contract_data, neutral_fill_contract_columns, read_position_ratio,
+)
 
 
 UTC = timezone.utc
@@ -66,6 +69,19 @@ def _make_engine():
             PRIMARY KEY (liquidation_time, symbol, side, price, amount)
         )
         """,
+        """
+        CREATE TABLE crypto_position_ratio_binance (
+            bucket_time TIMESTAMP,
+            symbol TEXT,
+            ratio_type TEXT,
+            ratio REAL,
+            long_value REAL,
+            short_value REAL,
+            origin TEXT,
+            ingested_at TIMESTAMP,
+            PRIMARY KEY (bucket_time, symbol, ratio_type)
+        )
+        """,
     ]
     with engine.begin() as conn:
         for sql in ddl:
@@ -78,6 +94,9 @@ def patched_engine(monkeypatch):
     engine = _make_engine()
     # db.get_engine 带 lru_cache，monkeypatch 替换函数整体
     monkeypatch.setattr(db, "get_engine", lambda: engine)
+    # get_contract_engine 同样带 lru_cache：不替换的话第一个测试的 engine 会被缓存，
+    # 之后的测试读到的都是那张空表（2026-09-14 修复测试隔离）
+    monkeypatch.setattr(db, "get_contract_engine", lambda: engine)
     # read_funding 等使用本地的 public.xxx 前缀 → SQLite 不支持 schema 前缀
     # 因此调用方需显式传 table=
     return engine
@@ -342,3 +361,124 @@ def test_merge_contract_data_nan_before_first_observation() -> None:
     merged = merge_contract_data(ohlcv, df_funding=funding)
     assert merged["funding_rate"].iloc[:3].isna().all()
     assert merged["funding_rate"].iloc[3:].notna().all()
+
+
+# ---------------------------------------------------------------------------
+# read_position_ratio（Spider 2026-09-08 新表，长格式 → 宽表）
+# ---------------------------------------------------------------------------
+
+def _insert_ratios(engine, rows):
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO crypto_position_ratio_binance "
+                 "(bucket_time, symbol, ratio_type, ratio, origin, ingested_at) "
+                 "VALUES (:t,:s,:rt,:r,:o,:t)"),
+            [{"t": t, "s": s, "rt": rt, "r": r, "o": o} for t, s, rt, r, o in rows],
+        )
+
+
+def test_read_position_ratio_pivots_long_to_wide(patched_engine) -> None:
+    t0, t1 = datetime(2026, 9, 7, 0, 0), datetime(2026, 9, 7, 0, 5)
+    _insert_ratios(patched_engine, [
+        (t0, "BTC/USDT", "top_account", 1.30, "vision"),
+        (t0, "BTC/USDT", "top_position", 2.10, "vision"),
+        (t0, "BTC/USDT", "global_account", 1.20, "vision"),
+        (t0, "BTC/USDT", "taker_vol", 0.95, "vision"),
+        (t1, "BTC/USDT", "top_account", 1.31, "vision"),
+        (t1, "BTC/USDT", "global_account", 1.21, "vision"),
+        (t0, "ETH/USDT", "top_account", 9.99, "vision"),
+    ])
+    df = read_position_ratio("BTC/USDT", table="crypto_position_ratio_binance")
+    assert list(df.columns) == ["timestamp", *RATIO_TYPES]
+    assert len(df) == 2
+    assert df.iloc[0]["top_position"] == pytest.approx(2.10)
+    assert df.iloc[0]["taker_vol"] == pytest.approx(0.95)
+    # 第二个桶只有两类 → 其余留 NaN，不填零
+    assert np.isnan(df.iloc[1]["top_position"])
+    assert df.iloc[1]["top_account"] == pytest.approx(1.31)
+    assert df["timestamp"].is_monotonic_increasing
+    assert 9.99 not in df["top_account"].tolist()
+
+
+def test_read_position_ratio_ratio_types_subset_and_range(patched_engine) -> None:
+    rows = [(datetime(2026, 9, 7, 0, 5 * i), "BTC/USDT", rt, 1.0 + i, "vision")
+            for i in range(4) for rt in ("top_account", "taker_vol")]
+    _insert_ratios(patched_engine, rows)
+    df = read_position_ratio(
+        "BTC/USDT", since="2026-09-07 00:05", until="2026-09-07 00:15",
+        ratio_types=("taker_vol",), table="crypto_position_ratio_binance",
+    )
+    assert list(df.columns) == ["timestamp", "taker_vol"]
+    assert df["taker_vol"].tolist() == [pytest.approx(2.0), pytest.approx(3.0)]
+
+
+def test_read_position_ratio_rejects_unknown_type(patched_engine) -> None:
+    with pytest.raises(ValueError, match="ratio_types"):
+        read_position_ratio("BTC/USDT", ratio_types=("bogus",),
+                            table="crypto_position_ratio_binance")
+
+
+def test_read_position_ratio_empty_returns_empty_with_columns(patched_engine) -> None:
+    df = read_position_ratio("BTC/USDT", table="crypto_position_ratio_binance")
+    assert df.empty
+    assert list(df.columns) == ["timestamp", *RATIO_TYPES]
+    assert str(df["timestamp"].dtype) == "datetime64[ns, UTC]"
+
+
+# ---------------------------------------------------------------------------
+# merge_contract_data(df_ratio=...) + coverage / neutral fill 对比率的处理
+# ---------------------------------------------------------------------------
+
+def _ratio_frame():
+    return pd.DataFrame({
+        "timestamp": pd.to_datetime(["2026-04-22 10:00", "2026-04-22 10:15"], utc=True),
+        "top_account": [1.3, 1.4],
+        "top_position": [2.0, 2.1],
+        "global_account": [1.1, 1.2],
+        "taker_vol": [0.9, 1.1],
+    })
+
+
+def test_merge_contract_data_broadcasts_ratio_backward() -> None:
+    ohlcv = pd.DataFrame({
+        "timestamp": pd.date_range("2026-04-22 10:00", periods=6, freq="5min", tz="UTC"),
+        "close": range(6),
+    })
+    merged = merge_contract_data(ohlcv, df_ratio=_ratio_frame())
+    assert merged["top_position"].tolist() == [
+        pytest.approx(2.0)] * 3 + [pytest.approx(2.1)] * 3
+    assert len(merged) == len(ohlcv)
+    assert {"top_account", "global_account", "taker_vol"} <= set(merged.columns)
+
+
+def test_ratio_source_is_reported_but_never_zero_filled() -> None:
+    ohlcv = pd.DataFrame({
+        "timestamp": pd.date_range("2026-04-22 09:50", periods=6, freq="5min", tz="UTC"),
+        "close": range(6),
+    })
+    merged = merge_contract_data(ohlcv, df_ratio=_ratio_frame())
+    cov = contract_coverage(merged)
+    assert cov.loc["ratio", "present"]
+    assert cov.loc["ratio", "coverage"] == pytest.approx(4 / 6)
+    filled = neutral_fill_contract_columns(merged)
+    # 09:50 / 09:55 在首个观测之前：比率没有"中性零"，必须保持 NaN
+    assert filled["top_account"].isna().sum() == 2
+
+
+def test_ratio_coverage_catches_hole_in_any_ratio_column() -> None:
+    """top_account 完整但 top_position 有内部缺口：覆盖检查必须看到并拦下。"""
+    ohlcv = pd.DataFrame({
+        "timestamp": pd.date_range("2026-04-22 10:00", periods=4, freq="5min", tz="UTC"),
+        "close": range(4),
+    })
+    ratio = pd.DataFrame({
+        "timestamp": pd.date_range("2026-04-22 10:00", periods=4, freq="5min", tz="UTC"),
+        "top_account": [1.3, 1.3, 1.3, 1.3],
+        "top_position": [2.0, np.nan, 2.1, 2.1],
+    })
+    merged = merge_contract_data(ohlcv, df_ratio=ratio)
+    cov = contract_coverage(merged)
+    assert cov.loc["ratio", "coverage"] == pytest.approx(3 / 4)
+    assert cov.loc["ratio", "interior_gaps"] == 1
+    with pytest.raises(ContractCoverageError, match="ratio"):
+        check_contract_coverage(merged, required={"ratio"}, log=lambda *_: None)

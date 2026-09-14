@@ -45,7 +45,7 @@ def test_required_contract_sources_maps_signal_prefixes() -> None:
 
 def test_contract_coverage_reports_fraction_and_range() -> None:
     cov = contract_coverage(_frame(n=100, funding_from=40))
-    assert set(cov.index) == {"funding", "oi", "liq"}
+    assert set(cov.index) == {"funding", "oi", "liq", "ratio"}
     f = cov.loc["funding"]
     assert f["present"] and f["coverage"] == pytest.approx(0.60)
     assert f["first_ts"] == pd.Timestamp("2024-01-01", tz="UTC") + pd.Timedelta(hours=4 * 40)
