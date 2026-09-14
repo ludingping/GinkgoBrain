@@ -1,0 +1,452 @@
+{
+  "config": "config/stage2_4h_signal_v2.yaml",
+  "symbols": [
+    "BTC/USDT",
+    "ETH/USDT",
+    "SOL/USDT",
+    "BNB/USDT"
+  ],
+  "variants": {
+    "P-EW4": {
+      "BTC": 0.25,
+      "ETH": 0.25,
+      "SOL": 0.25,
+      "BNB": 0.25
+    },
+    "P-EW2": {
+      "BTC": 0.5,
+      "ETH": 0.5
+    },
+    "P-BTC50": {
+      "BTC": 0.5,
+      "ETH": 0.16666666666666666,
+      "SOL": 0.16666666666666666,
+      "BNB": 0.16666666666666666
+    }
+  },
+  "periods": {
+    "pre_val": {
+      "window": "2021-07-31 16:00:00+00:00 \u2192 2024-09-30 08:00:00+00:00",
+      "mode": "improve",
+      "results": {
+        "BTC gate_only": {
+          "total_return": 0.7044031636030574,
+          "max_drawdown": -0.3763544994842919,
+          "sharpe": 0.45419708575082307,
+          "trades": 0,
+          "steps": 6941,
+          "mean_reward": NaN,
+          "years": 3.169406392694064,
+          "ann_return": 0.18321833466919624,
+          "calmar": 0.4868238188204345,
+          "trades_per_year": 0.0
+        },
+        "ETH gate_only": {
+          "total_return": 1.4847159468115136,
+          "max_drawdown": -0.3780722209079238,
+          "sharpe": 0.6252913394043599,
+          "trades": 0,
+          "steps": 6941,
+          "mean_reward": NaN,
+          "years": 3.169406392694064,
+          "ann_return": 0.3326507078899197,
+          "calmar": 0.8798602211267298,
+          "trades_per_year": 0.0
+        },
+        "SOL gate_only": {
+          "total_return": 9.715456572047648,
+          "max_drawdown": -0.6625487101068432,
+          "sharpe": 1.0035840379079344,
+          "trades": 0,
+          "steps": 6941,
+          "mean_reward": NaN,
+          "years": 3.169406392694064,
+          "ann_return": 1.113417800245729,
+          "calmar": 1.6805070831187312,
+          "trades_per_year": 0.0
+        },
+        "BNB gate_only": {
+          "total_return": 0.24605510272342035,
+          "max_drawdown": -0.6309224531277908,
+          "sharpe": 0.15115968241530464,
+          "trades": 0,
+          "steps": 6941,
+          "mean_reward": NaN,
+          "years": 3.169406392694064,
+          "ann_return": 0.07187360805753107,
+          "calmar": 0.11391829170323307,
+          "trades_per_year": 0.0
+        },
+        "P-EW4": {
+          "total_return": 2.2279122363548205,
+          "max_drawdown": -0.4269047469702436,
+          "sharpe": 0.8803343483580099,
+          "trades": 0,
+          "steps": 6941,
+          "mean_reward": NaN,
+          "years": 3.169406392694064,
+          "ann_return": 0.4473487732369772,
+          "calmar": 1.0478889644864,
+          "trades_per_year": 0.0
+        },
+        "P-EW2": {
+          "total_return": 1.1306338545331216,
+          "max_drawdown": -0.3728804745373786,
+          "sharpe": 0.6117248521584996,
+          "trades": 0,
+          "steps": 6941,
+          "mean_reward": NaN,
+          "years": 3.169406392694064,
+          "ann_return": 0.2695504183677806,
+          "calmar": 0.7228869216126255,
+          "trades_per_year": 0.0
+        },
+        "P-BTC50": {
+          "total_return": 1.6641336273491807,
+          "max_drawdown": -0.4082157189858385,
+          "sharpe": 0.797890253915934,
+          "trades": 0,
+          "steps": 6941,
+          "mean_reward": NaN,
+          "years": 3.169406392694064,
+          "ann_return": 0.3622911630004171,
+          "calmar": 0.8874992954717292,
+          "trades_per_year": 0.0
+        }
+      },
+      "corr": {
+        "BTC": {
+          "BTC": 1.0,
+          "ETH": 0.7655,
+          "SOL": 0.5129,
+          "BNB": 0.5843
+        },
+        "ETH": {
+          "BTC": 0.7655,
+          "ETH": 1.0,
+          "SOL": 0.5714,
+          "BNB": 0.621
+        },
+        "SOL": {
+          "BTC": 0.5129,
+          "ETH": 0.5714,
+          "SOL": 1.0,
+          "BNB": 0.4478
+        },
+        "BNB": {
+          "BTC": 0.5843,
+          "ETH": 0.621,
+          "SOL": 0.4478,
+          "BNB": 1.0
+        }
+      },
+      "acceptance": {
+        "P-EW4": {
+          "return": true,
+          "turnover": true,
+          "mdd": false,
+          "calmar": true,
+          "mode": "improve",
+          "pass": false
+        },
+        "P-EW2": {
+          "return": true,
+          "turnover": true,
+          "mdd": false,
+          "calmar": true,
+          "mode": "improve",
+          "pass": false
+        },
+        "P-BTC50": {
+          "return": true,
+          "turnover": true,
+          "mdd": false,
+          "calmar": true,
+          "mode": "improve",
+          "pass": false
+        }
+      }
+    },
+    "val": {
+      "window": "2024-09-30 16:00:00+00:00 \u2192 2026-04-12 08:00:00+00:00",
+      "mode": "improve",
+      "results": {
+        "BTC gate_only": {
+          "total_return": 0.17596222862309308,
+          "max_drawdown": -0.3394545919246935,
+          "sharpe": 0.30383311316233236,
+          "trades": 0,
+          "steps": 3353,
+          "mean_reward": NaN,
+          "years": 1.5310502283105023,
+          "ann_return": 0.11167331402700342,
+          "calmar": 0.32897865188336484,
+          "trades_per_year": 0.0
+        },
+        "ETH gate_only": {
+          "total_return": 0.09755243083698173,
+          "max_drawdown": -0.3826512863637772,
+          "sharpe": 0.1440312007890749,
+          "trades": 0,
+          "steps": 3353,
+          "mean_reward": NaN,
+          "years": 1.5310502283105023,
+          "ann_return": 0.06268273523705759,
+          "calmar": 0.1638116412274821,
+          "trades_per_year": 0.0
+        },
+        "SOL gate_only": {
+          "total_return": -0.007300097880448719,
+          "max_drawdown": -0.45320895935226735,
+          "sharpe": -0.009094198636534852,
+          "trades": 0,
+          "steps": 3353,
+          "mean_reward": NaN,
+          "years": 1.5310502283105023,
+          "ann_return": -0.004774089266869286,
+          "calmar": -0.010533969305665275,
+          "trades_per_year": 0.0
+        },
+        "BNB gate_only": {
+          "total_return": -0.17742323027544926,
+          "max_drawdown": -0.4588797348459529,
+          "sharpe": -0.27352573080914006,
+          "trades": 0,
+          "steps": 3353,
+          "mean_reward": NaN,
+          "years": 1.5310502283105023,
+          "ann_return": -0.11976669971775944,
+          "calmar": -0.26099801456249844,
+          "trades_per_year": 0.0
+        },
+        "P-EW4": {
+          "total_return": 0.06720202839181821,
+          "max_drawdown": -0.32200651036432926,
+          "sharpe": 0.11746614087365814,
+          "trades": 0,
+          "steps": 3353,
+          "mean_reward": NaN,
+          "years": 1.5310502283105023,
+          "ann_return": 0.04339606271242347,
+          "calmar": 0.13476765629155654,
+          "trades_per_year": 0.0
+        },
+        "P-EW2": {
+          "total_return": 0.1664670298328177,
+          "max_drawdown": -0.3051325085500648,
+          "sharpe": 0.296079949988478,
+          "trades": 0,
+          "steps": 3353,
+          "mean_reward": NaN,
+          "years": 1.5310502283105023,
+          "ann_return": 0.10580236421350642,
+          "calmar": 0.3467423537277636,
+          "trades_per_year": 0.0
+        },
+        "P-BTC50": {
+          "total_return": 0.11329614347078598,
+          "max_drawdown": -0.29655760375228646,
+          "sharpe": 0.2069929703057274,
+          "trades": 0,
+          "steps": 3353,
+          "mean_reward": NaN,
+          "years": 1.5310502283105023,
+          "ann_return": 0.07261438145184718,
+          "calmar": 0.24485759438662622,
+          "trades_per_year": 0.0
+        }
+      },
+      "corr": {
+        "BTC": {
+          "BTC": 1.0,
+          "ETH": 0.5496,
+          "SOL": 0.57,
+          "BNB": 0.4967
+        },
+        "ETH": {
+          "BTC": 0.5496,
+          "ETH": 1.0,
+          "SOL": 0.6324,
+          "BNB": 0.5725
+        },
+        "SOL": {
+          "BTC": 0.57,
+          "ETH": 0.6324,
+          "SOL": 1.0,
+          "BNB": 0.5285
+        },
+        "BNB": {
+          "BTC": 0.4967,
+          "ETH": 0.5725,
+          "SOL": 0.5285,
+          "BNB": 1.0
+        }
+      },
+      "acceptance": {
+        "P-EW4": {
+          "return": false,
+          "turnover": true,
+          "mdd": false,
+          "calmar": false,
+          "mode": "improve",
+          "pass": false
+        },
+        "P-EW2": {
+          "return": true,
+          "turnover": true,
+          "mdd": false,
+          "calmar": true,
+          "mode": "improve",
+          "pass": false
+        },
+        "P-BTC50": {
+          "return": false,
+          "turnover": true,
+          "mdd": false,
+          "calmar": false,
+          "mode": "improve",
+          "pass": false
+        }
+      }
+    },
+    "test": {
+      "window": "2026-04-12 16:00:00+00:00 \u2192 2026-09-03 08:00:00+00:00",
+      "mode": "noharm",
+      "results": {
+        "BTC gate_only": {
+          "total_return": 0.1720905479053152,
+          "max_drawdown": -0.04546329322839526,
+          "sharpe": 2.929479256487635,
+          "trades": 0,
+          "steps": 863,
+          "mean_reward": NaN,
+          "years": 0.39406392694063924,
+          "ann_return": 0.4962354502997903,
+          "calmar": 10.9150792884017,
+          "trades_per_year": 0.0
+        },
+        "ETH gate_only": {
+          "total_return": 0.115919540127841,
+          "max_drawdown": -0.05543923098886416,
+          "sharpe": 1.6988383750330753,
+          "trades": 0,
+          "steps": 863,
+          "mean_reward": NaN,
+          "years": 0.39406392694063924,
+          "ann_return": 0.32091851633379465,
+          "calmar": 5.788653821663871,
+          "trades_per_year": 0.0
+        },
+        "SOL gate_only": {
+          "total_return": 0.2305555165144073,
+          "max_drawdown": -0.10318983639521062,
+          "sharpe": 2.414717116366357,
+          "trades": 0,
+          "steps": 863,
+          "mean_reward": NaN,
+          "years": 0.39406392694063924,
+          "ann_return": 0.6929579855243255,
+          "calmar": 6.71537052225124,
+          "trades_per_year": 0.0
+        },
+        "BNB gate_only": {
+          "total_return": 0.15828025051393624,
+          "max_drawdown": -0.05322304382336973,
+          "sharpe": 2.5556927271583,
+          "trades": 0,
+          "steps": 863,
+          "mean_reward": NaN,
+          "years": 0.39406392694063924,
+          "ann_return": 0.45190201401725405,
+          "calmar": 8.490720965094976,
+          "trades_per_year": 0.0
+        },
+        "P-EW4": {
+          "total_return": 0.1698865911662757,
+          "max_drawdown": -0.058743714083708265,
+          "sharpe": 2.644195659840974,
+          "trades": 0,
+          "steps": 863,
+          "mean_reward": NaN,
+          "years": 0.39406392694063924,
+          "ann_return": 0.4891061473748295,
+          "calmar": 8.326101864752133,
+          "trades_per_year": 0.0
+        },
+        "P-EW2": {
+          "total_return": 0.14409417213422215,
+          "max_drawdown": -0.049279124467419666,
+          "sharpe": 2.359339412509165,
+          "trades": 0,
+          "steps": 863,
+          "mean_reward": NaN,
+          "years": 0.39406392694063924,
+          "ann_return": 0.40720077138367583,
+          "calmar": 8.263149473219476,
+          "trades_per_year": 0.0
+        },
+        "P-BTC50": {
+          "total_return": 0.1708243688056299,
+          "max_drawdown": -0.05337422571277828,
+          "sharpe": 2.7920267948456248,
+          "trades": 0,
+          "steps": 863,
+          "mean_reward": NaN,
+          "years": 0.39406392694063924,
+          "ann_return": 0.49213712474219395,
+          "calmar": 9.22050143435377,
+          "trades_per_year": 0.0
+        }
+      },
+      "corr": {
+        "BTC": {
+          "BTC": 1.0,
+          "ETH": 0.8446,
+          "SOL": 0.7426,
+          "BNB": 0.7462
+        },
+        "ETH": {
+          "BTC": 0.8446,
+          "ETH": 1.0,
+          "SOL": 0.7399,
+          "BNB": 0.7037
+        },
+        "SOL": {
+          "BTC": 0.7426,
+          "ETH": 0.7399,
+          "SOL": 1.0,
+          "BNB": 0.7596
+        },
+        "BNB": {
+          "BTC": 0.7462,
+          "ETH": 0.7037,
+          "SOL": 0.7596,
+          "BNB": 1.0
+        }
+      },
+      "acceptance": {
+        "P-EW4": {
+          "return": true,
+          "turnover": true,
+          "mdd": false,
+          "mode": "noharm",
+          "pass": false
+        },
+        "P-EW2": {
+          "return": true,
+          "turnover": true,
+          "mdd": false,
+          "mode": "noharm",
+          "pass": false
+        },
+        "P-BTC50": {
+          "return": true,
+          "turnover": true,
+          "mdd": false,
+          "mode": "noharm",
+          "pass": false
+        }
+      }
+    }
+  }
+}

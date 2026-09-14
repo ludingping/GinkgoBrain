@@ -66,3 +66,58 @@ def test_export_and_verify_roundtrip(tmp_path) -> None:
     y["fingerprint"]["expected"][-1]["target"] = 1.0 - y["fingerprint"]["expected"][-1]["target"]
     p.write_text(yaml.safe_dump(y, sort_keys=False), encoding="utf-8")
     assert verify(p) == 1
+
+
+# ─── gate_vol_target (H6 A/B arm, 2026-09-14) ────────────────────────────────
+
+def test_vol_rule_decisions_conventions() -> None:
+    from scripts.export_rule_artifact import vol_rule_decisions
+    idx = pd.date_range("2024-01-01", periods=40, freq="1D", tz="UTC")
+    rng = np.random.default_rng(1)
+    close = pd.Series(100 * np.exp(np.cumsum(rng.normal(0.01, 0.02, 40))), index=idx)
+    dec = vol_rule_decisions(close, gate_days=5, vol_window=10, vol_target=0.3, floor_level=1)
+    assert set(dec.columns) == {"regime_ok", "exit_ok", "target"}
+    assert dec["exit_ok"].all()
+    assert set(dec["target"].unique()) <= {0.0, 0.25, 0.5, 0.75, 1.0}
+    # warmup (rvol NaN) with gate on → full; gate off → 0 regardless of vol
+    on_warm = dec.index[(dec.regime_ok) & (dec.index < idx[10])]
+    assert (dec.loc[on_warm, "target"] == 1.0).all()
+    assert (dec.loc[~dec.regime_ok, "target"] == 0.0).all()
+    # floor: gate on never below 0.25 with floor_level=1
+    assert (dec.loc[dec.regime_ok, "target"] >= 0.25).all()
+
+
+def test_vol_rule_matches_backtester_quantisation() -> None:
+    """Contract decisions == backtest_rules.vol_target_level on daily_realized_vol (no hysteresis)."""
+    from scripts.backtest_rules import vol_target_level
+    from scripts.backtest_signal_layered import daily_realized_vol
+    from scripts.export_rule_artifact import make_golden_daily_closes_vol, vol_rule_decisions
+    golden = make_golden_daily_closes_vol()
+    frame = pd.DataFrame({"timestamp": golden.index, "open": golden.values, "high": golden.values,
+                          "low": golden.values, "close": golden.values, "volume": 1.0})
+    rv = daily_realized_vol(frame, frame, 30)            # 1-day bars → value of the same closed day
+    dec = vol_rule_decisions(golden, 200, 30, 0.30, 1)
+    for i in range(200, len(golden)):
+        raw = 4 * min(1.0, 0.30 / rv[i]) if np.isfinite(rv[i]) and rv[i] > 0 else np.nan
+        lvl = vol_target_level(raw, 4, hyst=0.0, floor=1)
+        expect = lvl / 4 if dec["regime_ok"].iloc[i] else 0.0
+        assert dec["target"].iloc[i] == pytest.approx(expect), i
+
+
+def test_vol_golden_exercises_intermediate_levels_and_roundtrip(tmp_path) -> None:
+    from scripts.export_rule_artifact import export, make_golden_daily_closes_vol, vol_rule_decisions
+    golden = make_golden_daily_closes_vol()
+    assert make_golden_daily_closes_vol().equals(golden)
+    tail = vol_rule_decisions(golden, 200, 30, 0.30, 1).iloc[-CHECK_ROWS:]
+    targets = set(tail["target"].round(2))
+    assert 0.0 in targets and len(targets - {0.0, 1.0}) >= 2, targets
+    dst = export("t_vol", 200, None, tmp_path, vol_target=0.30, vol_window=30, floor_level=1)
+    payload = yaml.safe_load(dst.read_text(encoding="utf-8"))
+    assert payload["rule"]["kind"] == "gate_vol_target"
+    assert payload["rule"]["vol"] == {**payload["rule"]["vol"], "window_days": 30, "target_ann": 0.3, "floor_level": 1}
+    assert verify(dst) == 0
+    assert verify_payload(payload) == []
+    payload["rule"]["vol"]["target_ann"] = 0.4                    # drift → fingerprint must fail
+    assert verify_payload(payload)
+    with pytest.raises(ValueError, match="no exit rule"):
+        build_payload("bad", 200, 50, vol_target=0.3, vol_window=30)

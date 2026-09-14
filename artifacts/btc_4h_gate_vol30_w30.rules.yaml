@@ -1,0 +1,655 @@
+version: 1
+artifact:
+  name: btc_4h_gate_vol30_w30
+  kind: rule
+  exported_at: '2026-09-14T16:50:32'
+  ginkgobrain_commit: 1364c09
+  design_doc: GinkgoRoad/docs/GinkgoBrain/BTC4h-趋势底座-持仓信号增量-设计.md H6（A/B 臂，未过 §1.1）
+  generator: scripts/export_rule_artifact.py
+rule:
+  kind: gate_vol_target
+  symbol: BTC/USDT
+  timeframe: 4h
+  daily_bars: UTC 1d klines; use only the last fully closed day (open_time + 1d <= now)
+  decision_cadence: every closed 4h bar; the daily inputs are those of the last closed UTC day
+  gate:
+    ma_days: 200
+    condition: daily close > SMA(ma_days) (strict)
+  exit:
+    ma_days: null
+    condition: none (pure regime gate)
+  vol:
+    window_days: 30
+    target_ann: 0.3
+    floor_level: 1
+    levels: 4
+    rvol: std(Δlog daily close over window_days, ddof=1) × sqrt(365); NaN/≤0 → level 4
+    level: floor(4·min(1, target_ann/rvol) + 0.5) clamped to [floor_level, 4]
+    target: level/4 when gate on, 0 when gate off
+  target:
+    'on': level/4
+    'off': 0.0
+  min_rebalance_pct: 0.02
+  commission: 0.001
+  min_daily_bars: 300
+  no_model: true
+backtest:
+  backtest_rules_h6_btc_h0.json:pre_val:
+    window: 2021-08-01 00:00:00+08:00 → 2024-09-30 20:00:00+08:00
+    gate_only:
+      total_return: 0.7044
+      max_drawdown: -0.3764
+      calmar: 0.4868
+      sharpe: 0.4542
+      trades: 28.0
+      trades_per_year: 8.8345
+    rule:
+      total_return: 0.5595
+      max_drawdown: -0.2014
+      calmar: 0.7475
+      sharpe: 0.6176
+      trades: 71.0
+      trades_per_year: 22.4017
+  backtest_rules_h6_btc_h0.json:val:
+    window: 2024-10-01 00:00:00+08:00 → 2026-04-12 20:00:00+08:00
+    gate_only:
+      total_return: 0.176
+      max_drawdown: -0.3395
+      calmar: 0.329
+      sharpe: 0.3038
+      trades: 19.0
+      trades_per_year: 12.4098
+    rule:
+      total_return: 0.1669
+      max_drawdown: -0.2186
+      calmar: 0.4851
+      sharpe: 0.3888
+      trades: 45.0
+      trades_per_year: 29.3916
+  backtest_rules_h6_btc_h0.json:test:
+    window: 2026-04-13 00:00:00+08:00 → 2026-09-03 20:00:00+08:00
+    gate_only:
+      total_return: 0.1721
+      max_drawdown: -0.0455
+      calmar: 10.9151
+      sharpe: 2.9295
+      trades: 0.0
+      trades_per_year: 0.0
+    rule:
+      total_return: 0.1419
+      max_drawdown: -0.0349
+      calmar: 11.4634
+      sharpe: 3.0597
+      trades: 1.0
+      trades_per_year: 2.5377
+fingerprint:
+  method: ginkgo_rule_golden_v1
+  golden_spec:
+    seed: 20260907
+    n_days: 320
+    start: '2024-01-01'
+    generator: scripts/export_rule_artifact.py::make_golden_daily_closes_vol
+  golden_closes:
+  - 99.96165
+  - 100.094501
+  - 100.190284
+  - 99.578066
+  - 99.919482
+  - 99.901217
+  - 99.772577
+  - 100.074921
+  - 99.94761
+  - 100.210855
+  - 100.450697
+  - 99.970963
+  - 99.695085
+  - 100.094521
+  - 99.875035
+  - 99.855923
+  - 100.313634
+  - 100.06435
+  - 99.992911
+  - 99.492929
+  - 100.852043
+  - 100.032624
+  - 99.685236
+  - 99.81681
+  - 99.793479
+  - 100.262059
+  - 99.888935
+  - 99.773567
+  - 99.353031
+  - 99.483409
+  - 100.070358
+  - 99.845537
+  - 100.95321
+  - 100.020434
+  - 99.933012
+  - 100.485328
+  - 100.594114
+  - 100.349788
+  - 99.947425
+  - 98.777686
+  - 100.450382
+  - 100.396396
+  - 99.672427
+  - 99.911351
+  - 100.15226
+  - 100.063992
+  - 100.386541
+  - 99.152038
+  - 99.884156
+  - 100.337796
+  - 100.090657
+  - 99.579418
+  - 99.895462
+  - 99.838965
+  - 100.030783
+  - 99.854861
+  - 99.478859
+  - 99.657018
+  - 99.971643
+  - 100.616452
+  - 100.61925
+  - 100.204423
+  - 99.722377
+  - 99.941805
+  - 100.334419
+  - 100.122039
+  - 100.257391
+  - 100.270639
+  - 100.912547
+  - 99.433034
+  - 100.554801
+  - 99.820782
+  - 100.16422
+  - 100.672857
+  - 99.962474
+  - 99.901141
+  - 100.016218
+  - 100.176629
+  - 99.584909
+  - 99.572979
+  - 100.133215
+  - 99.885162
+  - 99.836285
+  - 99.98083
+  - 100.49348
+  - 100.048613
+  - 99.767666
+  - 100.032115
+  - 99.463928
+  - 99.950869
+  - 100.110729
+  - 99.225137
+  - 101.118098
+  - 99.577618
+  - 100.101682
+  - 100.163624
+  - 99.952826
+  - 99.516512
+  - 99.954989
+  - 99.897293
+  - 99.403802
+  - 100.365037
+  - 99.626062
+  - 100.08321
+  - 100.356395
+  - 99.250795
+  - 100.020326
+  - 99.444883
+  - 100.938781
+  - 100.278323
+  - 100.077133
+  - 100.028508
+  - 99.953558
+  - 99.695074
+  - 100.225886
+  - 99.904615
+  - 100.527253
+  - 100.508018
+  - 99.769507
+  - 100.085823
+  - 99.541476
+  - 99.821712
+  - 100.066509
+  - 99.773213
+  - 99.19657
+  - 100.0086
+  - 99.850338
+  - 98.914147
+  - 99.787489
+  - 99.949798
+  - 100.668313
+  - 99.820986
+  - 99.910453
+  - 99.994501
+  - 99.825423
+  - 101.151264
+  - 100.137948
+  - 100.164876
+  - 99.904091
+  - 100.320277
+  - 98.882345
+  - 99.807346
+  - 100.026492
+  - 100.348861
+  - 100.377955
+  - 99.818549
+  - 99.285574
+  - 100.562082
+  - 99.555757
+  - 100.21631
+  - 100.543489
+  - 99.569705
+  - 99.990893
+  - 100.68591
+  - 99.293157
+  - 100.159358
+  - 99.889908
+  - 99.68612
+  - 99.953317
+  - 99.464757
+  - 99.731671
+  - 99.419054
+  - 100.448161
+  - 100.086171
+  - 100.01194
+  - 100.925332
+  - 100.082965
+  - 99.985339
+  - 99.886015
+  - 100.102679
+  - 99.844961
+  - 100.364438
+  - 100.230702
+  - 99.951651
+  - 99.89697
+  - 100.432933
+  - 100.199721
+  - 100.184422
+  - 99.227145
+  - 99.678664
+  - 99.862925
+  - 100.310813
+  - 99.626221
+  - 99.576964
+  - 100.658477
+  - 99.951384
+  - 100.041336
+  - 99.594952
+  - 99.97844
+  - 100.476847
+  - 100.15972
+  - 99.106457
+  - 99.971081
+  - 100.370518
+  - 99.744426
+  - 99.10726
+  - 99.900989
+  - 99.869423
+  - 99.981127
+  - 99.672433
+  - 99.605199
+  - 101.022489
+  - 101.002252
+  - 101.416205
+  - 102.212673
+  - 103.128977
+  - 103.678453
+  - 104.49487
+  - 104.90178
+  - 106.388984
+  - 107.15382
+  - 107.225024
+  - 107.495456
+  - 108.725029
+  - 108.751777
+  - 110.201148
+  - 110.690164
+  - 111.501156
+  - 111.846128
+  - 112.796177
+  - 113.217404
+  - 113.196038
+  - 114.390161
+  - 115.690785
+  - 115.177955
+  - 115.917809
+  - 117.749182
+  - 118.074435
+  - 117.89277
+  - 118.939249
+  - 119.676214
+  - 119.993734
+  - 119.954629
+  - 122.045128
+  - 122.000917
+  - 122.371118
+  - 123.663388
+  - 123.92168
+  - 124.77141
+  - 126.348304
+  - 127.005141
+  - 127.375543
+  - 127.792069
+  - 128.629508
+  - 129.147624
+  - 130.26803
+  - 130.288537
+  - 130.836268
+  - 131.516368
+  - 131.632087
+  - 132.737378
+  - 132.525988
+  - 133.443522
+  - 134.509206
+  - 135.414714
+  - 136.101515
+  - 137.512383
+  - 138.136636
+  - 137.428442
+  - 138.865754
+  - 140.203489
+  - 139.287994
+  - 155.094876
+  - 138.528317
+  - 155.790789
+  - 136.714326
+  - 142.748499
+  - 128.64639
+  - 154.915356
+  - 144.234711
+  - 141.238503
+  - 139.583357
+  - 129.365334
+  - 127.164317
+  - 130.297209
+  - 161.737695
+  - 146.981736
+  - 154.736055
+  - 148.555889
+  - 149.876236
+  - 140.012259
+  - 141.130832
+  - 140.721615
+  - 147.941413
+  - 142.39222
+  - 146.33297
+  - 146.752108
+  - 138.400081
+  - 139.024967
+  - 135.252581
+  - 143.360574
+  - 137.491434
+  - 136.212497
+  - 134.165254
+  - 132.888916
+  - 131.824917
+  - 130.914529
+  - 125.801855
+  - 124.902691
+  - 131.090136
+  - 122.261288
+  - 121.343313
+  - 122.189202
+  - 117.892004
+  - 122.553315
+  - 123.240097
+  - 117.322082
+  - 113.36276
+  - 111.257448
+  - 107.186961
+  - 103.154866
+  - 99.452306
+  - 95.913412
+  - 92.209295
+  - 88.687874
+  - 83.977722
+  - 80.906588
+  - 77.201964
+  - 73.954498
+  - 69.739813
+  check_rows: 60
+  expected:
+  - day: '2024-09-17'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-09-18'
+    regime_ok: true
+    exit_ok: true
+    target: 1.0
+  - day: '2024-09-19'
+    regime_ok: true
+    exit_ok: true
+    target: 0.75
+  - day: '2024-09-20'
+    regime_ok: true
+    exit_ok: true
+    target: 0.5
+  - day: '2024-09-21'
+    regime_ok: true
+    exit_ok: true
+    target: 0.5
+  - day: '2024-09-22'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-09-23'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-09-24'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-09-25'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-09-26'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-09-27'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-09-28'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-09-29'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-09-30'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-01'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-02'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-03'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-04'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-05'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-06'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-07'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-08'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-09'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-10'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-11'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-12'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-13'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-14'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-15'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-16'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-17'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-18'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-19'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-20'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-21'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-22'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-23'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-24'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-25'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-26'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-27'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-28'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-29'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-30'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-10-31'
+    regime_ok: true
+    exit_ok: true
+    target: 0.25
+  - day: '2024-11-01'
+    regime_ok: true
+    exit_ok: true
+    target: 0.5
+  - day: '2024-11-02'
+    regime_ok: true
+    exit_ok: true
+    target: 0.5
+  - day: '2024-11-03'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-04'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-05'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-06'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-07'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-08'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-09'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-10'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-11'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-12'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-13'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-14'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  - day: '2024-11-15'
+    regime_ok: false
+    exit_ok: true
+    target: 0.0
+  sha256: 695fcb6548add9c488bddc9ed6331720116d817c50a5b9fac0d3c975e3c08cce

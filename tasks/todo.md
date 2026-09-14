@@ -1,3 +1,20 @@
+# H7 组合层 + 第三臂（2026-09-14）
+
+- [x] 设计文档登记 H7（三个权重变体、四条标准、预判不过）——先于看数据
+- [x] `scripts/portfolio_gate_only.py`（每资产 gate_only 走同一 env，逐 bar 再平衡）+ tests 4
+- [x] 跑 pre_val / val / test；`reports/portfolio_gate_only_h7.md`
+- [x] 判定：三变体两段 MDD 比 0.87–1.13，全部 FAIL → 降回撤线在组合层也关闭；底座 = BTC gate_only
+- [x] 第三臂 Brain 侧：`export_rule_artifact.py` 新 kind `gate_vol_target` + 黄金路径 + tests 3；`artifacts/btc_4h_gate_vol30_w30.rules.yaml`（含 H6 回测摘要）
+- [ ] 第三臂 Spider 侧（子代理进行中）：overlay / rules / models 两列 / schema ALTER / bootstrap / executor / config / tests / 文档
+- [ ] 提交 Brain（组合层 + 契约）与 Spider（第三臂）；用户在服务器部署：git pull → paper-migrate → paper-seed → paper-pm2-restart
+- [ ] 下一步：H4b 持仓分歧三折探针（收益增强线）
+
+## 审查
+- H7 相关表是关键证据：0.45–0.84，回撤期同步；分散在加密内部不是回撤工具。
+- 今天一天关闭了三条降回撤路径（退出速度、波动率目标、分散），每条都是预登记 + 邻域 + 兄弟资产后关闭的，结论可信度比 09-07 高得多。
+
+---
+
 # H6 波动率目标仓位（2026-09-14，预登记后同日跑完）
 
 - [x] 设计文档登记 H6（机制、网格、四条通过标准）——先于看数据
