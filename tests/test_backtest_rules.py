@@ -284,3 +284,48 @@ def test_rvol_feature_and_gate_vol_act() -> None:
     lvl = act(None, env)[0]
     expected = max(1, min(4, int(np.floor(4 * min(1.0, 0.4 / rv[-1]) + 0.5))))
     assert lvl == expected
+
+
+# --- H8 chop-aware exit (2026-09-17) ---
+
+def test_daily_sma_cross_count_counts_sign_changes() -> None:
+    import numpy as np
+    import pandas as pd
+    from scripts.backtest_signal_layered import daily_sma_cross_count
+    # 1-day bars: a square wave → SMA(2) sits between the two levels, close crosses it every day
+    n = 30
+    ts = pd.date_range("2024-01-01", periods=n, freq="1D", tz="UTC")
+    close = np.where(np.arange(n) % 2 == 0, 90.0, 110.0)
+    full = pd.DataFrame({"timestamp": ts, "open": close, "high": close, "low": close,
+                         "close": close, "volume": 1.0})
+    cnt = daily_sma_cross_count(full, full, sma_days=2, lookback_days=10)
+    assert np.isnan(cnt[:10]).all()
+    assert cnt[-1] == 10                            # every day crosses
+    flat = full.assign(close=100.0, open=100.0, high=100.0, low=100.0)
+    assert daily_sma_cross_count(flat, flat, 2, 10)[-1] == 0
+
+
+def test_parse_and_act_gate_exit_chop() -> None:
+    import numpy as np
+    import pandas as pd
+    import pytest
+    from scripts.backtest_rules import make_act_fn, parse_rule
+    sp = parse_rule("gate_exit_chop:exit=50,lookback=60,max_cross=3")
+    assert sp.signals == ["dist_sma50", "xcross50_60"]
+    with pytest.raises(ValueError, match="gate_exit_chop needs"):
+        parse_rule("gate_exit_chop:exit=50")
+    bt = pd.DataFrame({"timestamp": pd.date_range("2024-01-01", periods=5, freq="4h", tz="UTC"),
+                       "dist_sma50": [-0.05, -0.05, 0.02, -0.05, np.nan],
+                       "xcross50_60": [1.0, 5.0, 5.0, np.nan, 2.0]})
+    gate = np.array([True, True, True, True, False])
+    act = make_act_fn(sp, bt, gate)
+
+    class Env:
+        current_step = 0
+    env = Env()
+    out = []
+    for i in range(5):
+        env.current_step = i
+        out.append(act(None, env)[0])
+    # i0: calm & below SMA50 → flat; i1/i2: chop → full; i3: crossings NaN → exit path, below → flat; i4: gate off
+    assert out == [0, 4, 4, 0, 0]

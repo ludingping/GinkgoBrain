@@ -24,6 +24,10 @@ Rule grammar:  name[:k=v,k=v,...]
     gate_vol:target=,window=[,hyst=,floor=]
                                     H6 volatility targeting: gate on → level round(4·min(1, target/rvol<window>))
                                     (annualised daily vol), never below `floor` (default 1); gate off → 0 %
+    gate_exit_chop:exit=,lookback=,max_cross=
+                                    H8 chop-aware exit: gate on & (#crossings of SMA(exit) in the last
+                                    `lookback` days) > max_cross → 100 % (exit switched off); otherwise
+                                    flat when daily close < SMA(exit); gate off → 0 %
     const:level=                    fixed target (sanity)
 Outputs reports/backtest_rules_<tag>.md + .json (one table per period).
 """
@@ -49,7 +53,7 @@ from envs.signal_layered_env import (                                  # noqa: E
 )
 from scripts.backtest_signal_layered import (                          # noqa: E402
     _ALLOWED_ENV_KEYS, DAILY_FEATURES, buy_and_hold_metrics, daily_realized_vol,
-    daily_sma_distance, daily_sma_gate,
+    daily_sma_cross_count, daily_sma_distance, daily_sma_gate,
     load_data, run_backtest, summarise,
 )
 from scripts.signal_ic_probe import (                                  # noqa: E402
@@ -90,10 +94,13 @@ class RuleSpec:
     def signals(self) -> list[str]:
         if self.name == "gate_vol":
             return [f"rvol{int(self.params['window'])}"]
+        if self.name == "gate_exit_chop":
+            e, lb = int(self.params["exit"]), int(self.params["lookback"])
+            return [f"dist_sma{e}", f"xcross{e}_{lb}"]
         return [self.params[k] for k in ("signal", "signal2") if k in self.params]
 
 
-_RULE_NAMES = {"gate_only", "gate_reduce", "gate_vol", "const"}
+_RULE_NAMES = {"gate_only", "gate_reduce", "gate_vol", "gate_exit_chop", "const"}
 
 
 def _coerce(v: str):
@@ -141,6 +148,13 @@ def parse_rule(text: str) -> RuleSpec:
             raise ValueError("gate_vol window must be an int ≥ 2 (days)")
         if not (isinstance(params["floor"], int) and 0 <= params["floor"] <= 4):
             raise ValueError("gate_vol floor must be an int in 0..4")
+    if name == "gate_exit_chop":
+        missing = {"exit", "lookback", "max_cross"} - params.keys()
+        if missing:
+            raise ValueError(f"gate_exit_chop needs {sorted(missing)}")
+        for k in ("exit", "lookback", "max_cross"):
+            if not (isinstance(params[k], int) and params[k] >= (0 if k == "max_cross" else 2)):
+                raise ValueError(f"gate_exit_chop {k} must be an int (exit/lookback ≥ 2 days, max_cross ≥ 0)")
     if name == "const" and "level" not in params:
         raise ValueError("const needs level=")
     if "level" in params and not (isinstance(params["level"], int) and 0 <= params["level"] <= 4):
@@ -159,6 +173,9 @@ def make_act_fn(spec: RuleSpec, bt_df: pd.DataFrame, gate: np.ndarray):
 
     if spec.name == "gate_vol":
         return _make_gate_vol_act(spec, bt_df, gate)
+
+    if spec.name == "gate_exit_chop":
+        return _make_gate_exit_chop_act(spec, bt_df, gate)
 
     # gate_reduce (optionally AND-ed with a second condition)
     def _cond(sig_key: str, thr_key: str, side_key: str):
@@ -218,6 +235,30 @@ def _make_gate_vol_act(spec: RuleSpec, bt_df: pd.DataFrame, gate: np.ndarray):
     return act
 
 
+def _make_gate_exit_chop_act(spec: RuleSpec, bt_df: pd.DataFrame, gate: np.ndarray):
+    """H8: gate off → 0; gate on & recent SMA crossings > max_cross (chop) → 100 % (exit ignored);
+    otherwise the V1 exit: 0 when daily close < SMA(exit), else 100 %. NaN crossings → V1 path."""
+    dist_col, cross_col = spec.signals
+    for col in (dist_col, cross_col):
+        if col not in bt_df.columns:
+            raise ValueError(f"rule feature '{col}' not in data columns")
+    dist = bt_df[dist_col].to_numpy(dtype=float)
+    cross = bt_df[cross_col].to_numpy(dtype=float)
+    max_cross = int(spec.params["max_cross"])
+    chop = cross > max_cross                       # NaN → False → exit applies
+    below = dist < 0.0                             # NaN → False → keep
+
+    def act(obs, env):
+        i = env.current_step
+        if not gate[i]:
+            return FLAT, None
+        if chop[i]:
+            return FULL, None
+        return (FLAT if below[i] else FULL), None
+
+    return act
+
+
 def rule_contract_sources(specs: list[RuleSpec]) -> set[str]:
     """Contract data sources referenced by the rules (signal names or raw columns)."""
     raw_to_src = {c: src for src, cols in CONTRACT_SOURCE_COLS.items() for c in cols}
@@ -232,6 +273,7 @@ def rule_contract_sources(specs: list[RuleSpec]) -> set[str]:
 
 _DIST_SMA_RE = re.compile(r"^dist_sma(\d+)$")
 _RVOL_RE = re.compile(r"^rvol(\d+)$")
+_XCROSS_RE = re.compile(r"^xcross(\d+)_(\d+)$")
 
 
 def resolve_daily_feature(name: str):
@@ -246,6 +288,10 @@ def resolve_daily_feature(name: str):
     if m:
         days = int(m.group(1))
         return lambda full, bt: daily_realized_vol(full, bt, days)
+    m = _XCROSS_RE.match(name)
+    if m:
+        sma_days, lookback = int(m.group(1)), int(m.group(2))
+        return lambda full, bt: daily_sma_cross_count(full, bt, sma_days, lookback)
     return None
 
 

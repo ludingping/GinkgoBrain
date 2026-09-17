@@ -155,6 +155,19 @@ def daily_realized_vol(full_df: pd.DataFrame, bt_df: pd.DataFrame,
     return _align_last_closed_day(lr.rolling(window_days).std() * np.sqrt(365.0), bt_df)
 
 
+def daily_sma_cross_count(full_df: pd.DataFrame, bt_df: pd.DataFrame,
+                          sma_days: int = 50, lookback_days: int = 60) -> np.ndarray:
+    """Number of sign changes of (daily close − SMA(sma_days)) within the last `lookback_days`
+    UTC days (inclusive of the last closed day). H8 chop detector; NaN during warmup."""
+    d = _daily_ohlc(full_df)["close"]
+    diff = d - d.rolling(sma_days).mean()
+    sign = np.sign(diff)
+    crossed = ((sign != sign.shift(1)) & diff.notna() & diff.shift(1).notna()).astype(float)
+    crossed[diff.isna()] = np.nan
+    count = crossed.rolling(lookback_days, min_periods=lookback_days).sum()
+    return _align_last_closed_day(count, bt_df)
+
+
 # Daily-derived, gate-aligned features usable by rules and the IC probe: name → fn(full_df, bt_df)
 DAILY_FEATURES = {
     "dist_sma200": lambda full, bt: daily_sma_distance(full, bt, 200),
