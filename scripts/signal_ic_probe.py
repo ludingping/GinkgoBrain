@@ -32,6 +32,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import yaml
 import pandas as pd
 from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score
@@ -40,10 +41,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.backtest_signal_layered import DAILY_FEATURES, daily_sma_gate    # noqa: E402
-from scripts.signal_linear_baseline import load_df_from_config           # noqa: E402
+from scripts.signal_linear_baseline import _to_ccxt_symbol, load_df_from_config           # noqa: E402
 from utils.data_loader import required_contract_sources                  # noqa: E402
 from utils.indicators import add_indicators                              # noqa: E402
 from utils.signals import add_contract_signals, add_signals, znorm       # noqa: E402
+from utils.data_loader import read_position_ratio, resample_position_ratio  # noqa: E402
 from utils.splits import TimeFold, time_folds                            # noqa: E402
 
 IC_MIN = 0.03
@@ -116,9 +118,19 @@ PROBE_FEATURES = {
     # bounded [-1, 1] versions (rolling 200-bar z, cap 3) — usable as rule thresholds
     "funding_cum_3d_z": lambda df, tf: znorm(funding_cum(df, tf, "3D"), window=200),
     "funding_cum_7d_z": lambda df, tf: znorm(funding_cum(df, tf, "7D"), window=200),
+    # ── H4 / H5 (Binance long/short & taker ratios; utils.data_loader.read_position_ratio) ──
+    "top_position_90d_z": lambda df, tf: znorm(df["top_position"], window=_bars("90D", tf)),
+    "retail_minus_top": lambda df, tf: df["global_account"] - df["top_account"],
+    "retail_minus_top_90d_z": lambda df, tf: znorm(df["global_account"] - df["top_account"],
+                                                   window=_bars("90D", tf)),
+    "taker_dev_z30d": lambda df, tf: znorm(df["taker_vol_mean"] - 1.0, window=_bars("30D", tf)),
 }
-_PROBE_SOURCE = {name: ("oi" if name.startswith("oi_") else "funding") for name in PROBE_FEATURES}
+_RATIO_FEATURE_COL = {"top_position_90d_z": "top_position", "retail_minus_top": "global_account",
+                      "retail_minus_top_90d_z": "global_account", "taker_dev_z30d": "taker_vol_mean"}
+_PROBE_SOURCE = {name: ("ratio" if name in _RATIO_FEATURE_COL else "oi" if name.startswith("oi_") else "funding")
+                 for name in PROBE_FEATURES}
 _PROBE_RAW_COL = {"oi": "sum_open_interest", "funding": "funding_rate"}
+RATIO_MIN_COVERAGE = 0.80         # top_* have ~15 % Vision holes in 2022; below this the probe refuses
 DIST_COL = "dist_sma200"          # close / UTC-daily SMA200 − 1 of the last closed day
 
 
@@ -127,7 +139,7 @@ def add_probe_features(df: pd.DataFrame, names: list[str], timeframe: str) -> pd
     out = df.copy()
     for n in names:
         if n in PROBE_FEATURES:
-            raw = _PROBE_RAW_COL[_PROBE_SOURCE[n]]
+            raw = _RATIO_FEATURE_COL.get(n) or _PROBE_RAW_COL[_PROBE_SOURCE[n]]
             if raw not in out.columns:
                 raise ValueError(f"probe feature '{n}' needs a {raw} column")
             out[n] = PROBE_FEATURES[n](out, timeframe)
@@ -269,13 +281,47 @@ def format_horizon_table(stats: dict[str, list[FoldStat]], ic_min: float = IC_MI
     return lines
 
 
+def merge_position_ratio(df: pd.DataFrame, config: Path, tf: str,
+                         min_coverage: float = RATIO_MIN_COVERAGE, log=print) -> pd.DataFrame:
+    """Attach the four L/S ratios (+ taker_vol_mean) resampled to `tf`, exact-joined on the
+    bar's open timestamp (bucket-end value → known at bar close). Done *after* add_indicators
+    so the ratio holes (NaN, never filled) cannot drop OHLCV rows via the global dropna."""
+    with config.open(encoding="utf-8") as f:
+        c = yaml.safe_load(f)["crypto"]
+    tz = c.get("timezone", "Asia/Shanghai")
+    start_utc = pd.Timestamp(c["start_date"], tz=tz).tz_convert("UTC").isoformat()
+    end_utc = pd.Timestamp(c["end_date"], tz=tz).tz_convert("UTC").isoformat()
+    raw = read_position_ratio(_to_ccxt_symbol(c["symbol"]), since=start_utc, until=end_utc)
+    if raw.empty:
+        raise ValueError("position ratio table returned no rows for the config window")
+    # Bucket in the config tz so bucket edges coincide with the OHLCV bars (resample_ohlcv
+    # runs in that tz): a UTC daily bucket would sit 8 h off an Asia/Shanghai daily bar.
+    ts = raw["timestamp"]
+    raw = raw.assign(timestamp=(ts.dt.tz_localize("UTC") if ts.dt.tz is None else ts).dt.tz_convert(tz))
+    r = resample_position_ratio(raw, tf)
+    out = df.merge(r, on="timestamp", how="left")
+    for col in ("top_account", "top_position", "global_account", "taker_vol", "taker_vol_mean"):
+        cov = out[col].notna().mean()
+        first = out.loc[out[col].notna(), "timestamp"]
+        log(f"[ratio] {col:16s} coverage={cov:6.1%}  "
+            f"{first.iloc[0] if len(first) else 'ABSENT'} → {first.iloc[-1] if len(first) else ''}")
+        if cov < min_coverage:
+            raise ValueError(f"position ratio '{col}' coverage {cov:.1%} < {min_coverage:.0%}; "
+                             "narrow start_date (clean window from 2023-01) or backfill")
+    return out
+
+
 def build_frame(config: Path, signals: list[str],
                 extra_features: list[str] = ()) -> tuple[pd.DataFrame, str]:
     req = required_sources(list(signals) + list(extra_features))
-    df_tf, tf = load_df_from_config(config, with_contracts=bool(req), required_contracts=req)
+    need_ratio = "ratio" in req
+    req_db = req - {"ratio"}
+    df_tf, tf = load_df_from_config(config, with_contracts=bool(req_db), required_contracts=req_db)
     df = add_indicators(df_tf)
     df = add_signals(df)
     df = add_contract_signals(df, timeframe=tf)
+    if need_ratio:
+        df = merge_position_ratio(df, config, tf)
     df = add_probe_features(df, signals + extra_features, tf)
     missing = [s for s in signals if s not in df.columns]
     if missing:

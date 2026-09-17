@@ -329,3 +329,26 @@ def test_parse_and_act_gate_exit_chop() -> None:
         out.append(act(None, env)[0])
     # i0: calm & below SMA50 → flat; i1/i2: chop → full; i3: crossings NaN → exit path, below → flat; i4: gate off
     assert out == [0, 4, 4, 0, 0]
+
+
+# --- H4/H5 probe features (2026-09-17) ---
+
+def test_probe_ratio_features_and_sources() -> None:
+    import numpy as np
+    import pandas as pd
+    from scripts.signal_ic_probe import add_probe_features, required_sources
+    n = 700
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC"),
+        "close": 100.0, "top_position": np.linspace(1.5, 2.5, n), "top_account": 1.2,
+        "global_account": np.linspace(1.0, 1.6, n), "taker_vol_mean": 1.0 + 0.1 * np.sin(np.arange(n)),
+    })
+    names = ["top_position_90d_z", "retail_minus_top", "retail_minus_top_90d_z", "taker_dev_z30d"]
+    assert required_sources(names) == {"ratio"}
+    out = add_probe_features(df, names, "4h")
+    assert out["retail_minus_top"].iloc[0] == pytest.approx(1.0 - 1.2)
+    assert out["top_position_90d_z"].iloc[-1] > 0 and abs(out["top_position_90d_z"].iloc[-1]) <= 1
+    assert out["taker_dev_z30d"].notna().sum() > 0
+    import pytest as _pt
+    with _pt.raises(ValueError, match="needs a"):
+        add_probe_features(df.drop(columns="taker_vol_mean"), ["taker_dev_z30d"], "4h")

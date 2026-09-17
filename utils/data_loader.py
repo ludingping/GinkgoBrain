@@ -179,6 +179,24 @@ def read_position_ratio(
     return wide.sort_index().reset_index()[cols]
 
 
+
+def resample_position_ratio(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """5min ratio frame (from :func:`read_position_ratio`) → one row per `timeframe` bucket,
+    labelled by bucket **start**: bucket-end value (`last`) for every ratio column, plus
+    ``taker_vol_mean`` (bucket mean — taker_vol is too noisy to use its last 5min print).
+    Buckets with no rows are absent (no fill). Values are known at bucket close, i.e. at the
+    close of the OHLCV bar with the same open timestamp."""
+    if df.empty:
+        cols = [c for c in df.columns if c != "timestamp"]
+        return pd.DataFrame(columns=["timestamp", *cols, "taker_vol_mean"])
+    ratio_cols = [c for c in RATIO_TYPES if c in df.columns]
+    g = df.set_index("timestamp").sort_index().groupby(pd.Grouper(freq=timeframe, closed="left", label="left"))
+    out = g[ratio_cols].last()
+    if "taker_vol" in ratio_cols:
+        out["taker_vol_mean"] = g["taker_vol"].mean()
+    out = out.dropna(how="all")
+    return out.reset_index()
+
 # =============================================================================
 # 合约数据 merge —— 把 Spider 侧 funding / OI / liquidation 对齐到 OHLCV 主表
 #

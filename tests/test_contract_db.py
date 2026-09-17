@@ -482,3 +482,18 @@ def test_ratio_coverage_catches_hole_in_any_ratio_column() -> None:
     assert cov.loc["ratio", "interior_gaps"] == 1
     with pytest.raises(ContractCoverageError, match="ratio"):
         check_contract_coverage(merged, required={"ratio"}, log=lambda *_: None)
+
+
+def test_resample_position_ratio_last_and_taker_mean() -> None:
+    from utils.data_loader import resample_position_ratio
+    ts = pd.date_range("2026-09-07 00:00", periods=6, freq="5min", tz="UTC")
+    df = pd.DataFrame({"timestamp": ts, "top_account": [1.0, 1.1, 1.2, 1.3, 1.4, 1.5],
+                       "top_position": [2.0] * 6, "global_account": [1.0] * 6,
+                       "taker_vol": [0.5, 1.5, 1.0, 2.0, 0.0, 1.0]})
+    out = resample_position_ratio(df, "15min")
+    assert out["timestamp"].tolist() == [ts[0], ts[3]]           # labelled by bucket start
+    assert out["top_account"].tolist() == [pytest.approx(1.2), pytest.approx(1.5)]   # bucket-end value
+    assert out["taker_vol"].tolist() == [pytest.approx(1.0), pytest.approx(1.0)]
+    assert out["taker_vol_mean"].tolist() == [pytest.approx(1.0), pytest.approx(1.0)]
+    empty = resample_position_ratio(df.iloc[0:0], "4h")
+    assert empty.empty and "taker_vol_mean" in empty.columns
