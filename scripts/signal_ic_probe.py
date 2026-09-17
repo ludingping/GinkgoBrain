@@ -312,7 +312,8 @@ def merge_position_ratio(df: pd.DataFrame, config: Path, tf: str,
 
 
 def build_frame(config: Path, signals: list[str],
-                extra_features: list[str] = ()) -> tuple[pd.DataFrame, str]:
+                extra_features: list[str] = (),
+                min_ratio_coverage: float = RATIO_MIN_COVERAGE) -> tuple[pd.DataFrame, str]:
     req = required_sources(list(signals) + list(extra_features))
     need_ratio = "ratio" in req
     req_db = req - {"ratio"}
@@ -321,7 +322,7 @@ def build_frame(config: Path, signals: list[str],
     df = add_signals(df)
     df = add_contract_signals(df, timeframe=tf)
     if need_ratio:
-        df = merge_position_ratio(df, config, tf)
+        df = merge_position_ratio(df, config, tf, min_coverage=min_ratio_coverage)
     df = add_probe_features(df, signals + extra_features, tf)
     missing = [s for s in signals if s not in df.columns]
     if missing:
@@ -340,13 +341,16 @@ def main() -> int:
     ap.add_argument("--gate-on", action="store_true",
                     help="evaluate only bars where the UTC daily SMA200 gate is on "
                          "(the regime in which a gate × signal rule can act)")
+    ap.add_argument("--min-ratio-coverage", type=float, default=RATIO_MIN_COVERAGE,
+                    help="refuse if any L/S ratio column covers less than this fraction of bars "
+                         f"(default {RATIO_MIN_COVERAGE}; lower it only for a documented data-start reason)")
     ap.add_argument("--where", action="append", default=[],
                     help="row filter col<op>value (AND-ed, repeatable), e.g. dist_sma200<0.10")
     args = ap.parse_args()
     horizons = args.horizon or [6, 18]
     clauses = [parse_where(w) for w in args.where]
 
-    df, tf = build_frame(args.config, args.signal, extra_features=[c for c, _, _ in clauses])
+    df, tf = build_frame(args.config, args.signal, extra_features=[c for c, _, _ in clauses], min_ratio_coverage=args.min_ratio_coverage)
     mask = None
     if args.gate_on:
         mask = daily_sma_gate(df, df)
