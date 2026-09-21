@@ -145,3 +145,15 @@ def test_long_portfolio_backtest_mechanics() -> None:
     assert out["n"].iloc[6] == 6 and out["turnover"].iloc[6] <= 2.0              # 第二次换仓
     # 无成本对照：净收益 = 毛收益 − 成本
     np.testing.assert_allclose(out["ret_net"], out["ret_gross"] - out["cost"])
+
+
+def test_blend_sleeves_constant_mix_and_reset() -> None:
+    from strategies.cn_a_trend_base.ew_index import blend_sleeves
+    dates = pd.bdate_range("2024-01-29", "2024-02-06")
+    rets = pd.DataFrame({"bm": 0.0, "rev": 0.10}, index=dates)          # rev 每天 +10%，bm 0
+    out = blend_sleeves(rets, {"bm": 0.7, "rev": 0.3}, reset="M", reset_cost=0.0)
+    assert out["ret_net"].iloc[0] == pytest.approx(0.03)               # 首日 30% × 10%
+    assert out["ret_net"].iloc[1] > 0.03                                # 漂移：rev 权重上升
+    reset_day = pd.Timestamp("2024-02-01")
+    assert out.loc[reset_day, "turnover"] > 0 and out.loc[reset_day, "ret_net"] == pytest.approx(0.03)
+    assert (out.loc[out.index != reset_day, "turnover"] == 0).all()

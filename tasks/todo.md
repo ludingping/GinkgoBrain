@@ -8,7 +8,8 @@
 - [x] E-A1 自建 EW 指数 + 宇宙日表（`strategies/cn_a_trend_base/`、`scripts/cn_build_ew_index.py`）；H-A1 L2 → **FAIL**（踏空 V 形反弹，收益比 0.3）
 - [x] E-A2 横截面探针（`xs_probe.py`、`scripts/cn_xs_ic_probe.py`）→ H-A2 FAIL、**H-A3 PASS**、H-A4 FAIL（价差反向）
 - [x] E-A3 H-A3 反转 L2（`xs_portfolio.py`、`scripts/cn_backtest_xs.py`）→ **FAIL**：收益比 1.2–2.5 但 val/test MDD 比 1.1–1.4；随机十分位对照 MDD 比 ≈ 1.0
-- [ ] 用户决定：H-A3b 混合 / H-A3c 反转×门控 / 停（均事后登记，只能进模拟盘臂）
+- [x] H-A3b 混合（用户选定，事后登记）→ FAIL：val MDD 比 1.04–1.09、收益比 1.06–1.11
+- [ ] 用户决定：等 D-A2 后回看 / 重审目标函数（等权 BM 内含反转溢价）/ 停
 - [x] D-A1 指数日线（Spider 8ecf7f3，已回填 2005→）
 - [ ] D-A2 历史 ST/上市日期（Spider）
 

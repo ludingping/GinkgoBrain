@@ -67,3 +67,26 @@ def summarize(idx: pd.Series, periods_per_year: int = 244) -> dict:
             "calmar": float(ann / abs(mdd)) if mdd < 0 else float("nan"),
             "sharpe": float(r.mean() / r.std() * np.sqrt(periods_per_year)) if r.std() > 0 else float("nan"),
             "years": years}
+
+
+def blend_sleeves(rets: pd.DataFrame, weights: dict[str, float], reset: str | None = "M",
+                  reset_cost: float = 0.0015) -> pd.DataFrame:
+    """两条（或多条）腿的净日收益按固定比例混合，`reset` 频率把腿间比例复位到目标，期间随收益漂移。
+    腿内换仓成本已含在各腿 ret 里；复位成本 = Σ|Δw| × reset_cost（平均单边成本近似）。
+    Returns: DataFrame(ret_net, turnover, cost, idx_net)。"""
+    cols = [c for c in weights if c in rets.columns]
+    R = rets[cols].fillna(0.0).to_numpy(float)
+    tgt = np.array([weights[c] for c in cols], float); tgt = tgt / tgt.sum()
+    rb = rebalance_days(rets.index, reset)
+    w = tgt.copy(); out = np.zeros((len(rets), 3))
+    for t in range(len(rets)):
+        turn = 0.0
+        if rb.iloc[t] and t > 0:
+            turn = np.abs(tgt - w).sum(); w = tgt.copy()
+        cost = turn * reset_cost
+        r = float((w * R[t]).sum())
+        out[t] = (r - cost, turn, cost)
+        w = w * (1.0 + R[t]) / (1.0 + r) if (1.0 + r) != 0 else w
+    df = pd.DataFrame(out, index=rets.index, columns=["ret_net", "turnover", "cost"])
+    df["idx_net"] = (1.0 + df["ret_net"]).cumprod()
+    return df
