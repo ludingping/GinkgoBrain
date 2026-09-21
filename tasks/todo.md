@@ -6,8 +6,11 @@
 - [x] 设计文档 v0.1：§1.1 双栏验收（风控层 / 收益层）+ 三段（pre_val 2017–2021 / val 2022–2025-06 / test 2025-07→）+ 成本表 + H-A1~A4 登记含预判
 - [x] 用户确认 v0.1（BM 自建 EW；80%/60%；成本表）；D-A1 指数数据源 = 中证官方接口（Spider 子代理实施中）
 - [x] E-A1 自建 EW 指数 + 宇宙日表（`strategies/cn_a_trend_base/`、`scripts/cn_build_ew_index.py`）；H-A1 L2 → **FAIL**（踏空 V 形反弹，收益比 0.3）
-- [ ] E-A2 横截面探针 → H-A2/A3/A4 一批 L1
-- [ ] D-A1 指数日线、D-A2 历史 ST/上市日期（Spider）
+- [x] E-A2 横截面探针（`xs_probe.py`、`scripts/cn_xs_ic_probe.py`）→ H-A2 FAIL、**H-A3 PASS**、H-A4 FAIL（价差反向）
+- [x] E-A3 H-A3 反转 L2（`xs_portfolio.py`、`scripts/cn_backtest_xs.py`）→ **FAIL**：收益比 1.2–2.5 但 val/test MDD 比 1.1–1.4；随机十分位对照 MDD 比 ≈ 1.0
+- [ ] 用户决定：H-A3b 混合 / H-A3c 反转×门控 / 停（均事后登记，只能进模拟盘臂）
+- [x] D-A1 指数日线（Spider 8ecf7f3，已回填 2005→）
+- [ ] D-A2 历史 ST/上市日期（Spider）
 
 ---
 

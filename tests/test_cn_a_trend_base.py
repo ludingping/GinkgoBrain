@@ -91,3 +91,57 @@ def test_ew_index_monthly_rebalance_drifts_between() -> None:
     mid = out.loc[dates[2]:pd.Timestamp("2024-01-31")]
     assert out["n"].iloc[1] == 2                                  # 首次建仓不等月初
     assert (mid["turnover"] == 0).all() and (mid["cost"] == 0).all()
+
+
+# --- xs_probe (E-A2) ---
+
+def test_xs_probe_features_and_ic_sign() -> None:
+    from strategies.cn_a_trend_base.xs_probe import (daily_rank_ic, decile_returns, fold_stats,
+                                                     forward_open_return, momentum, nw_tstat, realized_vol, reversal, verdict)
+    rng = np.random.default_rng(0)
+    dates = pd.date_range("2017-01-01", periods=400, freq="B")
+    n = 300
+    close = pd.DataFrame(100 * np.exp(np.cumsum(rng.normal(0, 0.02, (len(dates), n)), axis=0)),
+                         index=dates, columns=[f"{600000 + i}" for i in range(n)])
+    open_px = close.shift(1).fillna(100.0)
+    mask = pd.DataFrame(True, index=dates, columns=close.columns)
+    fwd = forward_open_return(open_px, 5)
+    assert fwd.iloc[0, 0] == pytest.approx(open_px.iloc[6, 0] / open_px.iloc[1, 0] - 1)
+    # 特征 = 未来收益本身 → IC ≈ +1；取负 → −1
+    ic = daily_rank_ic(fwd, fwd, mask)
+    assert ic.dropna().min() > 0.99
+    ic_neg = daily_rank_ic(-fwd, fwd, mask)
+    st = fold_stats(ic_neg, mask.sum(axis=1), {"f": ("2017-01-01", "2018-06-30")}, lags=5)
+    assert st[0].ic_mean < -0.99 and st[0].ic_t < -10
+    assert verdict(st, expected_sign=-1)[0] and not verdict(st, expected_sign=+1)[0]
+    assert abs(nw_tstat(pd.Series(rng.normal(0, 1, 500)), 5)) < 4
+    m = momentum(close, 12); r = reversal(close, 20); v = realized_vol(close, 60)
+    assert m.iloc[252, 0] == pytest.approx(close.iloc[231, 0] / close.iloc[0, 0] - 1)
+    assert r.iloc[20, 0] == pytest.approx(close.iloc[20, 0] / close.iloc[0, 0] - 1)
+    assert v.iloc[100].between(0.005, 0.05).all()
+    dec = decile_returns(fwd, fwd, mask, every=20)
+    assert (dec["D10"] > dec["D1"]).all()
+
+
+# --- xs_portfolio (E-A3) ---
+
+def test_long_portfolio_backtest_mechanics() -> None:
+    from strategies.cn_a_trend_base.xs_portfolio import long_portfolio_backtest, select_bottom_decile
+    dates = pd.date_range("2024-01-01", periods=12, freq="B")
+    cols = [f"6{i:05d}" for i in range(60)]
+    rng = np.random.default_rng(2)
+    close = pd.DataFrame(100 * np.exp(np.cumsum(rng.normal(0, 0.01, (12, 60)), axis=0)), index=dates, columns=cols)
+    open_px = close * (1 + rng.normal(0, 0.002, close.shape))
+    mask = pd.DataFrame(True, index=dates, columns=cols)
+    feat = pd.DataFrame(rng.normal(size=close.shape), index=dates, columns=cols)
+    sel = select_bottom_decile(feat.iloc[0], mask.iloc[0], q=10)
+    assert len(sel) == 6 and feat.iloc[0][sel].max() <= feat.iloc[0].drop(sel).min()
+    lu = pd.DataFrame(False, index=dates, columns=cols); lu.loc[dates[1], sel[0]] = True   # 首只涨停不可买
+    out = long_portfolio_backtest(close, open_px, feat, mask, every=5, q=10, limit_up=lu)
+    assert np.isfinite(out["ret_net"]).all()
+    assert out["n"].iloc[1] == 5 and out["cash"].iloc[1] > 0                     # 6 选 5 买入，现金留存
+    assert out["turnover"].iloc[1] > 0 and out["cost"].iloc[1] > 0
+    assert (out["turnover"].iloc[2:5] == 0).all()                                 # 持有期不换手
+    assert out["n"].iloc[6] == 6 and out["turnover"].iloc[6] <= 2.0              # 第二次换仓
+    # 无成本对照：净收益 = 毛收益 − 成本
+    np.testing.assert_allclose(out["ret_net"], out["ret_gross"] - out["cost"])
