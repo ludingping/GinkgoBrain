@@ -36,10 +36,12 @@ dependencies = [
     "ipywidgets>=8.1.8",
     "lightgbm>=4.6.0",
     "shap>=0.51.0",
+    "ipympl>=0.10.0",
 ]
 
 [dependency-groups]
 dev = [
+    "jupyterlab>=4.6.5",
     "pytest>=8.0.0",
 ]
 

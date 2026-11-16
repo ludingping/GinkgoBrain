@@ -20,6 +20,7 @@ scikit-learn>=1.4.0
 # Visualization
 matplotlib>=3.8.0
 plotly>=5.20.0
+ipympl>=0.10.0
 
 # Utilities
 python-dotenv>=1.0.0
@@ -29,3 +30,6 @@ tensorboard>=2.16.0
 
 # Testing
 pytest>=8.0.0
+
+# Research notebooks
+jupyterlab>=4.6.5
